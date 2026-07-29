@@ -1,0 +1,23 @@
+[package]
+
+version = "0.1.0"
+category = "isaaclab"
+readme  = "README.md"
+
+title       = "Humanoid G1 Run-Jump"
+author      = "Nepher Robotics"
+maintainer  = "Nepher Robotics"
+description = "Hierarchical run/jump policies for Unitree G1 with a frozen BeyondMimic tracker and AMP."
+repository  = ""
+keywords    = ["humanoid", "g1", "run", "jump", "amp", "isaaclab"]
+
+[dependencies]
+"isaaclab"        = {}
+"isaaclab_assets" = {}
+"isaaclab_rl"     = {}
+"isaaclab_tasks"  = {}
+
+[[python.module]]
+name = "humanoid_run_jump"
+
+[isaac_lab_settings]

@@ -1,0 +1,49 @@
+#usda 1.0
+(
+    defaultPrim = "g1_holo_compat"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "g1_holo_compat" (
+    variants = {
+        string Physics = "PhysX"
+        string Sensor = "Sensors"
+    }
+    prepend variantSets = ["Physics", "Sensor"]
+)
+{
+    over "worldBody" (
+        active = false
+    )
+    {
+    }
+        variantSet "Physics" = {
+        "None" (
+            prepend references = @configuration/g1_holo_compat_base.usd@
+        ) {
+            over "joints" (
+                active = false
+            )
+            {
+            }
+
+        }
+        "PhysX" (
+            prepend payload = @configuration/g1_holo_compat_physics.usd@
+        ) {
+
+        }
+    }
+    variantSet "Sensor" = {
+        "None" {
+
+        }
+        "Sensors" (
+            prepend payload = @configuration/g1_holo_compat_sensor.usd@
+        ) {
+
+        }
+    }
+}
+

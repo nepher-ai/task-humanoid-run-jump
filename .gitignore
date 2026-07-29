@@ -1,0 +1,75 @@
+# Omniverse / Isaac Sim
+**/*.dmp
+**/.thumbs
+_isaac_sim*
+_repo
+_build
+.lastformat
+
+# Python
+.DS_Store
+**/__pycache__/
+**/*.py[cod]
+**/*.egg-info/
+.eggs/
+dist/
+build/
+**/.pytest_cache/
+**/*.pb
+*.egg
+*.whl
+
+# IDE
+**/.idea/
+**/.vscode/
+*.swp
+
+# Training / runtime outputs
+logs/
+outputs/
+output/
+runs/
+recordings/
+videos/
+wandb/
+**/.neptune/
+*.tmp
+
+# --- Code + packaged robot assets only ---
+# Root / local runtime data (keep locally; do not commit)
+motions/
+policy/
+
+# Motion / dataset formats
+*.csv
+*.pkl
+*.zarr
+*.npz
+
+# Model weights / checkpoints
+*.pt
+*.onnx
+*.ckpt
+*.gz
+*.jit
+*.json
+
+# Binary / media outside the tracked assets tree
+*.usd
+*.usda
+*.usdc
+*.stl
+*.obj
+*.dae
+*.mtl
+*.png
+*.jpg
+*.jpeg
+*.hdr
+*.mp4
+*.gif
+*.wav
+
+# Allow the vendored G1 assets under the extension package
+!source/humanoid_run_jump/humanoid_run_jump/assets/
+!source/humanoid_run_jump/humanoid_run_jump/assets/**

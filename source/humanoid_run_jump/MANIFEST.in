@@ -1,0 +1,3 @@
+include config/extension.toml
+recursive-include humanoid_run_jump/assets *
+recursive-include humanoid_run_jump/tasks *.yaml
