@@ -178,6 +178,12 @@ class RewardsCfg:
         weight=12.0,
         params={"command_name": "jump"},
     )
+    # Potential-based flight tuck toward push_fold* (no over-tuck); land/stop untouched.
+    apex_fold = RewTerm(
+        func=mdp.apex_fold,
+        weight=8.0,
+        params={"command_name": "jump"},
+    )
     flight_distance = RewTerm(
         func=mdp.flight_distance_progress,
         weight=18.0,

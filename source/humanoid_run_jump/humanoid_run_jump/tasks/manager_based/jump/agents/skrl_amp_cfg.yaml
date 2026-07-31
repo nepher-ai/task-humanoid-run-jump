@@ -74,9 +74,9 @@ agent:
   value_loss_scale: 2.5
   discriminator_loss_scale: 5.0
   amp_batch_size: 512
-  # Task-led mix so AMP style cannot dominate while never leaving the ground.
-  task_reward_weight: 0.65
-  style_reward_weight: 0.35
+  # Mild style bump for tuck polish; task still leads (land/stop is solved).
+  task_reward_weight: 0.60
+  style_reward_weight: 0.40
   discriminator_batch_size: 4096
   discriminator_reward_scale: 1.0
   discriminator_logit_regularization_scale: 0.05

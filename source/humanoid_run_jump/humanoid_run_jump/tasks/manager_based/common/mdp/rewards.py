@@ -23,6 +23,7 @@ from humanoid_run_jump.tasks.manager_based.common.mdp.gait import (
 )
 from humanoid_run_jump.tasks.manager_based.common.mdp.jump_envelope import (
     FOOT_SEP_MAX_FLIGHT,
+    TUCK_EXTENDED,
     foot_sep_flight_max,
 )
 
@@ -200,7 +201,7 @@ def _once_success(env: ManagerBasedRLEnv, attr: str, latch_attr: str) -> torch.T
 
 
 # ---------------------------------------------------------------------------
-# Jump dense shaping (8-term set)
+# Jump dense shaping (9-term set)
 # ---------------------------------------------------------------------------
 
 
@@ -349,6 +350,52 @@ def flight_distance_progress(
     else:
         active = active & (_foot_sep_cached(env) <= sep_cap)
     return active.float() * (dist / target).clamp(0.0, 1.2)
+
+
+def apex_fold(
+    env: ManagerBasedRLEnv,
+    command_name: str = "jump",
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Potential-based push-leg tuck toward ``push_fold*`` over full flight.
+
+    Pays only when episode-min pelvis→ankle (``_ep_min_push_d``) improves,
+    normalized by ``(TUCK_EXTENDED − push_fold*)`` and saturated at the target
+    (no deeper-than-star bonus). Sums to ≤1 per episode — cannot be farmed by
+    holding a tuck. Active for the whole airborne window so fold at/after apex
+    counts; cut after land so EXTEND→land opening is undisturbed.
+    """
+    del asset_cfg
+    has_liftoff = getattr(env, "_ep_has_liftoff", None)
+    has_landed = getattr(env, "_ep_has_landed", None)
+    min_push = getattr(env, "_ep_min_push_d", None)
+    if has_liftoff is None or min_push is None:
+        return torch.zeros(env.num_envs, device=env.device)
+    both_air = _both_feet_air_cached(env)
+    active = has_liftoff & both_air
+    if has_landed is not None:
+        active = active & (~has_landed)
+
+    try:
+        fold_star = _jump_term(env, command_name).push_fold_star.clamp(min=0.05)
+    except (KeyError, AttributeError):
+        return torch.zeros(env.num_envs, device=env.device)
+
+    # Sentinel 10.0 = not yet measured in air.
+    measured = min_push < 9.0
+    denom = (float(TUCK_EXTENDED) - fold_star).clamp(min=0.05)
+    progress = ((float(TUCK_EXTENDED) - min_push) / denom).clamp(0.0, 1.0)
+    progress = torch.where(measured & active, progress, torch.zeros_like(progress))
+
+    paid = getattr(env, "_ep_fold_progress_paid", None)
+    if paid is None:
+        paid = torch.zeros(env.num_envs, device=env.device)
+        env._ep_fold_progress_paid = paid
+
+    delta = (progress - paid).clamp(min=0.0)
+    # In-place so amp_env episode resets keep the same buffer identity.
+    paid.copy_(torch.maximum(paid, progress))
+    return delta
 
 
 def heading_keep(

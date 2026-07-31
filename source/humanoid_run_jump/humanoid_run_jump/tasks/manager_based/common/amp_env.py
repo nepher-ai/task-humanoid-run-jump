@@ -169,6 +169,8 @@ class AmpManagerBasedRLEnv(ManagerBasedRLEnv):
         # Apex-snapshot / window hurdle geometry (push fold / swing extend / asymmetry).
         # Extrema over the airborne window; `_ep_apex_*` mirrors them for logging.
         self._ep_min_push_d = torch.full((n,), 10.0, device=self.device)
+        # Potential already paid by apex_fold (saturates at push_fold*).
+        self._ep_fold_progress_paid = torch.zeros(n, device=self.device)
         self._ep_max_swing_d = torch.zeros(n, device=self.device)
         self._ep_apex_push_d = torch.zeros(n, device=self.device)
         self._ep_apex_swing_d = torch.zeros(n, device=self.device)
@@ -403,6 +405,9 @@ class AmpManagerBasedRLEnv(ManagerBasedRLEnv):
         self._ep_peak_rise = torch.where(fresh, torch.zeros_like(self._ep_peak_rise), self._ep_peak_rise)
         self._ep_min_push_d = torch.where(
             fresh, torch.full_like(self._ep_min_push_d, 10.0), self._ep_min_push_d
+        )
+        self._ep_fold_progress_paid = torch.where(
+            fresh, torch.zeros_like(self._ep_fold_progress_paid), self._ep_fold_progress_paid
         )
         self._ep_max_swing_d = torch.where(
             fresh, torch.zeros_like(self._ep_max_swing_d), self._ep_max_swing_d
@@ -1005,6 +1010,7 @@ class AmpManagerBasedRLEnv(ManagerBasedRLEnv):
         self._ep_tuck_r[done_ids] = 0.0
         self._ep_peak_rise[done_ids] = 0.0
         self._ep_min_push_d[done_ids] = 10.0
+        self._ep_fold_progress_paid[done_ids] = 0.0
         self._ep_max_swing_d[done_ids] = 0.0
         self._ep_apex_push_d[done_ids] = 0.0
         self._ep_apex_swing_d[done_ids] = 0.0

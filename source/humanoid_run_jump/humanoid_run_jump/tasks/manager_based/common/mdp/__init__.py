@@ -56,6 +56,7 @@ from .observations import (
 from .rewards import (
     action_rate_l2,
     alive_bonus,
+    apex_fold,
     flat_orientation,
     flight_distance_progress,
     foot_clearance,
@@ -139,6 +140,7 @@ __all__ = [
     "velocity_commands",
     "action_rate_l2",
     "alive_bonus",
+    "apex_fold",
     "flat_orientation",
     "flight_distance_progress",
     "foot_clearance",
