@@ -37,8 +37,11 @@ wandb/
 
 # --- Code + packaged robot assets only ---
 # Root / local runtime data (keep locally; do not commit)
-motions/
-policy/
+/motions/
+/policy/
+
+# images
+/images/
 
 # Motion / dataset formats
 *.csv
@@ -69,7 +72,16 @@ policy/
 *.mp4
 *.gif
 *.wav
+*.png
 
-# Allow the vendored G1 assets under the extension package
+# Allow the vendored G1 assets and motions under the extension package
 !source/humanoid_run_jump/humanoid_run_jump/assets/
 !source/humanoid_run_jump/humanoid_run_jump/assets/**
+!source/humanoid_run_jump/humanoid_run_jump/motions/
+!source/humanoid_run_jump/humanoid_run_jump/motions/**
+
+# Re-ignore bytecode under the allowed motions tree (negations above would otherwise include it)
+source/humanoid_run_jump/humanoid_run_jump/motions/**/__pycache__/
+source/humanoid_run_jump/humanoid_run_jump/motions/**/*.py[cod]
+source/humanoid_run_jump/humanoid_run_jump/assets/**/__pycache__/
+source/humanoid_run_jump/humanoid_run_jump/assets/**/*.py[cod]

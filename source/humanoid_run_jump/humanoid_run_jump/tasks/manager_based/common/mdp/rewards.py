@@ -3,7 +3,11 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Reward terms for run and jump environments."""
+"""Reward terms for run and jump environments.
+
+Jump task uses ≤9 terms that specify WHAT to do (clear h, travel d, land,
+stand). Pose style (HOW) is left to AMP + hard terminations.
+"""
 
 from __future__ import annotations
 
@@ -15,14 +19,11 @@ from isaaclab.sensors import ContactSensor
 from humanoid_run_jump.tracker.reduced_coords import quat_apply_inverse
 from humanoid_run_jump.tasks.manager_based.common.mdp.gait import (
     foot_contact_mask,
-    lead_foot_forward_mask,
     resolve_ankle_body_ids,
 )
 from humanoid_run_jump.tasks.manager_based.common.mdp.jump_envelope import (
-    CLEARANCE_EXCESS_MARGIN,
-    FOOT_SEP_MAX_APEX,
     FOOT_SEP_MAX_FLIGHT,
-    TUCK_EXTENDED,
+    foot_sep_flight_max,
 )
 
 if TYPE_CHECKING:
@@ -109,16 +110,8 @@ def _pitch_rate_b(asset) -> torch.Tensor:
     return ang_b[:, 1]
 
 
-def _tilt_from_upright(asset) -> torch.Tensor:
-    cos_tilt = (-asset.data.projected_gravity_b[:, 2]).clamp(-1.0, 1.0)
-    return torch.acos(cos_tilt)
-
-
 def _forward_pitch_b(asset) -> torch.Tensor:
-    """Forward lean angle (rad): positive = chest toward body +x.
-
-    Uses ``atan2(-g_b_x, -g_b_z)`` so CSV jump apex leans are positive (~0.15 rad).
-    """
+    """Forward lean angle (rad): positive = chest toward body +x."""
     g = asset.data.projected_gravity_b
     return torch.atan2(-g[:, 0], -g[:, 2])
 
@@ -142,20 +135,22 @@ def _ep_phase(env: ManagerBasedRLEnv) -> torch.Tensor:
     return phase
 
 
-def _per_leg_tuck(
-    env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Per-leg pelvis→ankle 3D distances ``(d_l, d_r)``."""
-    tuck_l = getattr(env, "_ep_tuck_l", None)
-    tuck_r = getattr(env, "_ep_tuck_r", None)
-    if tuck_l is not None and tuck_r is not None:
-        return tuck_l, tuck_r
-    asset = env.scene[asset_cfg.name]
-    left_id, right_id = resolve_ankle_body_ids(env, asset_cfg.name)
-    root = asset.data.root_pos_w
-    d_l = torch.linalg.norm(root - asset.data.body_pos_w[:, left_id], dim=-1)
-    d_r = torch.linalg.norm(root - asset.data.body_pos_w[:, right_id], dim=-1)
-    return d_l, d_r
+def _jump_cache(env: ManagerBasedRLEnv) -> dict | None:
+    """Per-step quantities published by ``_update_jump_metrics_and_style``."""
+    return getattr(env, "_jump_step", None)
+
+
+def _both_feet_air_cached(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg | None = None,
+    contact_force_threshold: float = 5.0,
+) -> torch.Tensor:
+    cache = _jump_cache(env)
+    if cache is not None and "both_air" in cache:
+        return cache["both_air"]
+    if sensor_cfg is None:
+        sensor_cfg = SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link")
+    return _both_feet_air(env, sensor_cfg, contact_force_threshold)
 
 
 def _foot_sep(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
@@ -166,564 +161,22 @@ def _foot_sep(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg
     )
 
 
-# ---------------------------------------------------------------------------
-# Jump dense shaping
-# ---------------------------------------------------------------------------
-
-
-def takeoff_launch(
-    env: ManagerBasedRLEnv,
-    command_name: str = "jump",
-    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
-    contact_force_threshold: float = 5.0,
-    vel_std: float = 1.0,
-    vz_overshoot: float = 0.15,
-    pitch_std: float = 0.12,
-    clean_omega0: float = 2.2,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+def _foot_sep_cached(
+    env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
 ) -> torch.Tensor:
-    """Launch shaping: envelope velocity + forward pitch (no upright bias).
-
-    * PLANT/PUSH while left-supported: track ``(v_x*, v_z*)`` with asymmetric
-      ``v_z`` (overshoot above ``v_z* + vz_overshoot`` is penalized) and forward
-      pitch toward ``pitch_takeoff*``.
-    * RISE while ascending: same with pitch-rate cleanliness.
-    """
-    phase = _ep_phase(env)
-    in_pp = (phase == 1) | (phase == 2)
-    in_rise = phase == 3
-    asset = env.scene[asset_cfg.name]
-    term = _jump_term(env, command_name)
-    both_air = _both_feet_air(env, sensor_cfg, contact_force_threshold)
-    contacts = foot_contact_mask(
-        env, sensor_cfg=sensor_cfg, contact_force_threshold=contact_force_threshold
-    )
-    left_c = contacts[:, 0]
-
-    target_v = term.target_vel_b
-    vel_b = quat_apply_inverse(asset.data.root_quat_w, asset.data.root_lin_vel_w)
-    # Asymmetric vz: treat overshoot as larger error so ballistic fly is not free.
-    vz_err = vel_b[:, 2] - target_v[:, 2]
-    vz_err = torch.where(vz_err > vz_overshoot, vz_err + (vz_err - vz_overshoot), vz_err)
-    err_xy = torch.sum(torch.square(vel_b[:, :2] - target_v[:, :2]), dim=1)
-    err = err_xy + torch.square(vz_err)
-    vel_track = torch.exp(-err / max(vel_std, 1e-3))
-    ascending = (asset.data.root_lin_vel_w[:, 2] > 0.0).float()
-    clean = _clean_takeoff_scale(asset, clean_omega0)
-    pitch = _forward_pitch_b(asset)
-    pitch_err = pitch - term.pitch_takeoff_star
-    pitch_track = torch.exp(-torch.square(pitch_err / max(pitch_std, 1e-3)))
-
-    grounded = (
-        in_pp.float() * left_c.float() * (~both_air).float() * vel_track * pitch_track
-    )
-    air = (
-        in_rise.float()
-        * both_air.float()
-        * ascending
-        * clean
-        * vel_track
-        * pitch_track
-    )
-    return grounded + air
+    cache = _jump_cache(env)
+    if cache is not None and "foot_sep" in cache:
+        return cache["foot_sep"]
+    return _foot_sep(env, asset_cfg=asset_cfg)
 
 
-def takeoff_foot(
-    env: ManagerBasedRLEnv,
-    once_per_episode: bool = True,
+def _forward_pitch_cached(
+    env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
 ) -> torch.Tensor:
-    """Sparse +1 for left-foot takeoff, once per episode at first liftoff.
-
-    Right-foot takeoff is an ``illegal_takeoff`` termination, so only left
-    credit is paid here.
-    """
-    valid = getattr(env, "_ep_takeoff_foot_valid", None)
-    foot = getattr(env, "_ep_takeoff_foot", None)
-    if valid is None or foot is None:
-        return torch.zeros(env.num_envs, device=env.device)
-
-    if not hasattr(env, "_jump_takeoff_foot_given"):
-        env._jump_takeoff_foot_given = torch.zeros(
-            env.num_envs, dtype=torch.bool, device=env.device
-        )
-    fresh = _ep_fresh_mask(env)
-    env._jump_takeoff_foot_given = env._jump_takeoff_foot_given & (~fresh)
-
-    hit = valid & (foot == 0) & (~env._jump_takeoff_foot_given)
-    if once_per_episode:
-        env._jump_takeoff_foot_given = env._jump_takeoff_foot_given | hit
-    return hit.float()
-
-
-def prep_step(
-    env: ManagerBasedRLEnv,
-    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
-    contact_force_threshold: float = 5.0,
-    min_lead_m: float = 0.04,
-    air_penalty: float = 1.0,
-) -> torch.Tensor:
-    """PREP phase: left running step while staying grounded (not a hop)."""
-    phase = _ep_phase(env)
-    in_prep = phase == 0
-    contacts = foot_contact_mask(
-        env, sensor_cfg=sensor_cfg, contact_force_threshold=contact_force_threshold
-    )
-    left_c = contacts[:, 0]
-    right_c = contacts[:, 1]
-    both_air = (~left_c) & (~right_c)
-    left_fwd = lead_foot_forward_mask(env, lead="left", min_lead_m=min_lead_m)
-    grounded = left_c | right_c
-    swing = in_prep & left_fwd & grounded
-    # Non-sticky: only penalize the current airborne frame (prep_timeout handles dead-ends).
-    air_pen = in_prep & both_air
-    return in_prep.float() * (0.80 * swing.float() - air_penalty * air_pen.float())
-
-
-def plant_push(
-    env: ManagerBasedRLEnv,
-    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
-    contact_force_threshold: float = 5.0,
-    min_lead_m: float = 0.04,
-    push_vz_min: float = 0.25,
-    com_std: float = 0.12,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
-    """PLANT/PUSH: left plant, CoM over left foot, right tuck, left push."""
-    phase = _ep_phase(env)
-    in_pp = (phase == 1) | (phase == 2)
-    contacts = foot_contact_mask(
-        env, sensor_cfg=sensor_cfg, contact_force_threshold=contact_force_threshold
-    )
-    left_c = contacts[:, 0]
-    right_c = contacts[:, 1]
-    both_air = (~left_c) & (~right_c)
-    left_fwd = lead_foot_forward_mask(env, lead="left", min_lead_m=min_lead_m)
-    asset = env.scene[asset_cfg.name]
-    vz = asset.data.root_lin_vel_w[:, 2]
-    left_id, right_id = resolve_ankle_body_ids(env, asset_cfg.name)
-    left_xy = asset.data.body_pos_w[:, left_id, :2]
-    root_xy = asset.data.root_pos_w[:, :2]
-    com_err = torch.linalg.norm(root_xy - left_xy, dim=-1)
-    com_track = torch.exp(-torch.square(com_err / max(com_std, 1e-3)))
-    right_tuck = torch.linalg.norm(
-        asset.data.root_pos_w - asset.data.body_pos_w[:, right_id], dim=-1
-    )
-    right_tuck_score = torch.exp(-torch.square((right_tuck - 0.45) / 0.12))
-
-    plant = in_pp & left_fwd & left_c & (~both_air)
-    push = in_pp & left_c & (~right_c) & left_fwd & (vz > push_vz_min) & (~both_air)
-
-    return (
-        0.35 * plant.float()
-        + 0.25 * (plant.float() * com_track)
-        + 0.20 * (push.float() * right_tuck_score)
-        + 0.70 * push.float()
-    )
-
-
-def apex_tuck(
-    env: ManagerBasedRLEnv,
-    command_name: str = "jump",
-    tuck_std: float = 0.15,
-    pitch_std: float = 0.12,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
-    """Drive both legs toward / below tuck_apex* while airborne ascending.
-
-    One-sided tuck score gated by forward-pitch scale so a vertical tuck no
-    longer pays full credit (angular-momentum-correct apex lean required).
-    """
-    has_liftoff = getattr(env, "_ep_has_liftoff", None)
-    if has_liftoff is None:
-        return torch.zeros(env.num_envs, device=env.device)
-    both_air = _both_feet_air(
-        env, SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link")
-    )
-    has_landed = getattr(env, "_ep_has_landed", None)
-    apex_latched = getattr(env, "_ep_apex_latched", None)
-    active = has_liftoff & both_air
-    if has_landed is not None:
-        active = active & (~has_landed)
-    if apex_latched is not None:
-        descending = env.scene["robot"].data.root_lin_vel_w[:, 2] < -0.20
-        active = active & (~(apex_latched & descending))
-
-    term = _jump_term(env, command_name)
-    d_l, d_r = _per_leg_tuck(env, asset_cfg=asset_cfg)
-    target = term.tuck_apex_star
-    std = max(tuck_std, 1e-3)
-    excess_l = (d_l - target).clamp(min=0.0)
-    excess_r = (d_r - target).clamp(min=0.0)
-    score_l = torch.exp(-torch.square(excess_l / std))
-    score_r = torch.exp(-torch.square(excess_r / std))
-    tuck = torch.minimum(score_l, score_r)
-
-    pitch = _forward_pitch_b(env.scene[asset_cfg.name])
-    pitch_err = pitch - term.pitch_apex_star
-    pitch_scale = torch.exp(-torch.square(pitch_err / max(pitch_std, 1e-3)))
-    # Kill credit for vertical / backward lean (pitch ≤ 0).
-    pitch_scale = pitch_scale * (pitch > 0.02).float()
-    return active.float() * tuck * pitch_scale
-
-
-def apex_pitch(
-    env: ManagerBasedRLEnv,
-    command_name: str = "jump",
-    pitch_std: float = 0.12,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
-    """Dense forward-pitch tracking at apex (same air window as apex_tuck)."""
-    has_liftoff = getattr(env, "_ep_has_liftoff", None)
-    if has_liftoff is None:
-        return torch.zeros(env.num_envs, device=env.device)
-    both_air = _both_feet_air(
-        env, SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link")
-    )
-    has_landed = getattr(env, "_ep_has_landed", None)
-    apex_latched = getattr(env, "_ep_apex_latched", None)
-    active = has_liftoff & both_air
-    if has_landed is not None:
-        active = active & (~has_landed)
-    if apex_latched is not None:
-        descending = env.scene["robot"].data.root_lin_vel_w[:, 2] < -0.20
-        active = active & (~(apex_latched & descending))
-
-    term = _jump_term(env, command_name)
-    pitch = _forward_pitch_b(env.scene[asset_cfg.name])
-    err = pitch - term.pitch_apex_star
-    score = torch.exp(-torch.square(err / max(pitch_std, 1e-3)))
-    score = score * (pitch > 0.02).float()
-    return active.float() * score
-
-
-def foot_clearance(
-    env: ManagerBasedRLEnv,
-    command_name: str = "jump",
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
-    """Dense sole-height progress toward commanded ``h_obstacle`` during flight.
-
-    Saturates at 1.0×h (no 1.2× farming). Excess height is a separate penalty.
-    """
-    has_liftoff = getattr(env, "_ep_has_liftoff", None)
-    has_landed = getattr(env, "_ep_has_landed", None)
-    if has_liftoff is None:
-        return torch.zeros(env.num_envs, device=env.device)
-    both_air = _both_feet_air(
-        env, SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link")
-    )
-    active = has_liftoff & both_air
-    if has_landed is not None:
-        active = active & (~has_landed)
-
-    asset = env.scene[asset_cfg.name]
-    left_id, right_id = resolve_ankle_body_ids(env, asset_cfg.name)
-    sole = 0.05
-    env_sole = getattr(env, "_ankle_to_sole", None)
-    if env_sole is not None:
-        sole = float(env_sole)
-    left_z = asset.data.body_pos_w[:, left_id, 2] - sole
-    right_z = asset.data.body_pos_w[:, right_id, 2] - sole
-    cur = torch.maximum(left_z, right_z)
-    h = _jump_term(env, command_name).h_obstacle.clamp(min=0.05)
-    return active.float() * (cur / h).clamp(0.0, 1.0)
-
-
-def excess_height_penalty(
-    env: ManagerBasedRLEnv,
-    command_name: str = "jump",
-    margin: float = CLEARANCE_EXCESS_MARGIN,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
-    """Penalize sole height above ``h + margin`` during flight (anti-balloon)."""
-    has_liftoff = getattr(env, "_ep_has_liftoff", None)
-    has_landed = getattr(env, "_ep_has_landed", None)
-    if has_liftoff is None:
-        return torch.zeros(env.num_envs, device=env.device)
-    both_air = _both_feet_air(
-        env, SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link")
-    )
-    active = has_liftoff & both_air
-    if has_landed is not None:
-        active = active & (~has_landed)
-
-    asset = env.scene[asset_cfg.name]
-    left_id, right_id = resolve_ankle_body_ids(env, asset_cfg.name)
-    sole = float(getattr(env, "_ankle_to_sole", 0.05))
-    left_z = asset.data.body_pos_w[:, left_id, 2] - sole
-    right_z = asset.data.body_pos_w[:, right_id, 2] - sole
-    cur = torch.maximum(left_z, right_z)
-    h = _jump_term(env, command_name).h_obstacle
-    excess = (cur - h - float(margin)).clamp(min=0.0)
-    return active.float() * (excess + 2.0 * torch.square(excess))
-
-
-def leg_extend(
-    env: ManagerBasedRLEnv,
-    tuck_target: float = TUCK_EXTENDED,
-    tuck_std: float = 0.10,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
-    """Open both legs toward landing extension after apex, before touchdown.
-
-    Score is ``min(score_l, score_r)`` so both ankles must open for credit.
-    Active on descent after apex (phase EXTEND or apex_latched & descending).
-    """
-    apex_latched = getattr(env, "_ep_apex_latched", None)
-    has_landed = getattr(env, "_ep_has_landed", None)
-    if apex_latched is None:
-        return torch.zeros(env.num_envs, device=env.device)
-    phase = _ep_phase(env)
-    vz = env.scene["robot"].data.root_lin_vel_w[:, 2]
-    descending = vz < 0.05
-    in_ext = (phase == 4) | (apex_latched & descending)
-    if has_landed is not None:
-        in_ext = in_ext & (~has_landed)
-    d_l, d_r = _per_leg_tuck(env, asset_cfg=asset_cfg)
-    std = max(tuck_std, 1e-3)
-    score_l = torch.exp(-torch.square((d_l - tuck_target) / std))
-    score_r = torch.exp(-torch.square((d_r - tuck_target) / std))
-    return in_ext.float() * torch.minimum(score_l, score_r)
-
-
-def extend_pitch(
-    env: ManagerBasedRLEnv,
-    pitch_std: float = 0.15,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
-    """On EXTEND/descent, reward pitch moving toward upright (pairs with apex lean)."""
-    apex_latched = getattr(env, "_ep_apex_latched", None)
-    has_landed = getattr(env, "_ep_has_landed", None)
-    if apex_latched is None:
-        return torch.zeros(env.num_envs, device=env.device)
-    phase = _ep_phase(env)
-    vz = env.scene[asset_cfg.name].data.root_lin_vel_w[:, 2]
-    descending = vz < 0.05
-    in_ext = (phase == 4) | (apex_latched & descending)
-    if has_landed is not None:
-        in_ext = in_ext & (~has_landed)
-    # Target near-upright but still slightly forward (~0.05) for landing prep.
-    pitch = _forward_pitch_b(env.scene[asset_cfg.name])
-    target = torch.full_like(pitch, 0.05)
-    score = torch.exp(-torch.square((pitch - target) / max(pitch_std, 1e-3)))
-    # Prefer pitch that is not strongly backward.
-    score = score * (pitch > -0.10).float()
-    return in_ext.float() * score
-
-
-def foot_split_penalty(
-    env: ManagerBasedRLEnv,
-    max_sep: float = FOOT_SEP_MAX_APEX,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
-    """Penalty for splits while airborne after liftoff (excess over CSV foot-sep cap).
-
-    Returns excess meters (clipped) so a large negative weight hurts more than
-    distance farming pays.
-    """
-    has_liftoff = getattr(env, "_ep_has_liftoff", None)
-    has_landed = getattr(env, "_ep_has_landed", None)
-    both_air = _both_feet_air(
-        env, SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link")
-    )
-    active = both_air
-    if has_liftoff is not None:
-        active = active & has_liftoff
-    if has_landed is not None:
-        active = active & (~has_landed)
-    sep = _foot_sep(env, asset_cfg=asset_cfg)
-    # Linear + quadratic excess so mild splits hurt and extreme splits dominate.
-    excess = (sep - max_sep).clamp(min=0.0)
-    return active.float() * (excess + 2.0 * torch.square(excess))
-
-
-def rejump_penalty(
-    env: ManagerBasedRLEnv,
-    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
-    contact_force_threshold: float = 5.0,
-) -> torch.Tensor:
-    """Penalize leaving the ground again after the first landing (anti double-jump)."""
-    phase = _ep_phase(env)
-    post = phase >= 5
-    has_landed = getattr(env, "_ep_has_landed", None)
-    if has_landed is None:
-        return torch.zeros(env.num_envs, device=env.device)
-    both_air = _both_feet_air(env, sensor_cfg, contact_force_threshold)
-    return (post & has_landed & both_air).float()
-
-
-def flight_distance_progress(
-    env: ManagerBasedRLEnv,
-    command_name: str = "jump",
-    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
-    contact_force_threshold: float = 5.0,
-    max_sep: float = FOOT_SEP_MAX_FLIGHT,
-) -> torch.Tensor:
-    """Dense heading progress toward commanded flight distance *during flight*.
-
-    Only while both feet are airborne after liftoff (not the entire post-flight
-    settle). Zeroed when the episode has already exceeded the anti-splits
-    foot-sep cap, so splits cannot farm distance reward.
-    """
-    term = _jump_term(env, command_name)
-    target = term.flight_distance.clamp(min=0.1)
-    flown = getattr(env, "_ep_flight_distance", None)
-    if flown is not None:
-        dist = torch.maximum(flown, term.progress.clamp(min=0.0))
-    else:
-        dist = term.progress.clamp(min=0.0)
-    both_air = _both_feet_air(env, sensor_cfg, contact_force_threshold)
-    has_liftoff = getattr(env, "_ep_has_liftoff", None)
-    active = both_air
-    if has_liftoff is not None:
-        active = active & has_liftoff
-    max_sep_ep = getattr(env, "_ep_max_foot_sep_flight", None)
-    if max_sep_ep is not None:
-        active = active & (max_sep_ep <= max_sep)
-    else:
-        active = active & (_foot_sep(env) <= max_sep)
-    return active.float() * (dist / target).clamp(0.0, 1.2)
-
-
-def heading_keep(
-    env: ManagerBasedRLEnv,
-    command_name: str = "jump",
-    std: float = 0.35,
-) -> torch.Tensor:
-    """Dense reward for keeping yaw aligned with episode-start heading.
-
-    Uses ``JumpCommand.heading_error`` (frozen ``_forward_w`` at resample).
-    Active for the whole episode so prep and flight spin are both shaped.
-    """
-    term = _jump_term(env, command_name)
-    err = term.heading_error.abs()
-    return torch.exp(-torch.square(err / max(std, 1e-3)))
-
-
-def land_and_idle(
-    env: ManagerBasedRLEnv,
-    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-    command_name: str = "jump",
-    stand_height: float = 0.75,
-    height_std: float = 0.10,
-    contact_force_threshold: float = 5.0,
-    impact_force_scale: float = 400.0,
-    max_tilt_rad: float = 0.40,
-    min_height: float = 0.68,
-    max_height: float = 0.95,
-    max_horiz_speed: float = 0.60,
-    max_joint_vel2: float = 40.0,
-    max_heading_err: float = 0.35,
-) -> torch.Tensor:
-    """Merged touchdown + idle recovery after a real flight.
-
-    Combines the former ``landing_quality`` and ``idle_recovery`` terms so the
-    idle stand is paid once. Active after ``_ep_has_landed`` inside the
-    post-landing window. Kneel-height / spun landings get little credit.
-    """
-    has_landed = getattr(env, "_ep_has_landed", None)
-    post_steps = getattr(env, "_ep_post_land_steps", None)
-    window = int(getattr(env, "_post_land_window_steps", 150))
-    if has_landed is None:
-        return torch.zeros(env.num_envs, device=env.device)
-
-    in_window = has_landed.clone()
-    if post_steps is not None:
-        in_window = has_landed & (post_steps <= window)
-
-    asset = env.scene[asset_cfg.name]
-    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
-    forces = contact_sensor.data.net_forces_w[:, sensor_cfg.body_ids, :]
-    force_mag = torch.norm(forces, dim=-1)
-    both_contact = (force_mag > contact_force_threshold).all(dim=-1)
-
-    height = asset.data.root_pos_w[:, 2]
-    tilt = _tilt_from_upright(asset)
-    upright = tilt < max_tilt_rad
-    height_ok = (height > min_height) & (height < max_height)
-    horiz = torch.linalg.norm(asset.data.root_lin_vel_w[:, :2], dim=-1)
-    vz = asset.data.root_lin_vel_w[:, 2].abs()
-    joint_vel2 = torch.sum(torch.square(asset.data.joint_vel), dim=1)
-    try:
-        heading_err = _jump_term(env, command_name).heading_error.abs()
-    except (KeyError, AttributeError):
-        heading_err = torch.zeros(env.num_envs, device=env.device)
-    heading_ok = heading_err < max_heading_err
-
-    # Scale landing credit by obstacle clearance so flat hops cannot farm idle.
-    peak_sole = getattr(env, "_ep_peak_foot_z", None)
-    try:
-        h_cmd = _jump_term(env, command_name).h_obstacle.clamp(min=0.05)
-    except (KeyError, AttributeError):
-        h_cmd = torch.ones(env.num_envs, device=env.device)
-    if peak_sole is not None:
-        clear_scale = (peak_sole.max(dim=-1).values / h_cmd).clamp(0.0, 1.0)
-    else:
-        clear_scale = torch.ones(env.num_envs, device=env.device)
-    land_scale = 0.20 + 0.80 * clear_scale
-
-    # Sparse-ish feet-first touchdown credit (once per episode).
-    if not hasattr(env, "_jump_land_touch_given"):
-        env._jump_land_touch_given = torch.zeros(
-            env.num_envs, dtype=torch.bool, device=env.device
-        )
-    env._jump_land_touch_given = env._jump_land_touch_given & (~_ep_fresh_mask(env))
-    had_flight = getattr(env, "_ep_had_flight", None)
-    had = has_landed if had_flight is None else (has_landed | had_flight)
-    touch = (
-        both_contact
-        & had
-        & upright
-        & height_ok
-        & heading_ok
-        & (~env._jump_land_touch_given)
-    )
-    env._jump_land_touch_given = env._jump_land_touch_given | touch
-    touch_bonus = touch.float() * 0.5 * clear_scale
-
-    height_track = torch.exp(-torch.square(height - stand_height) / (height_std**2))
-    upright_exp = torch.exp(-torch.square(tilt / max(max_tilt_rad, 1e-3)))
-    heading_exp = torch.exp(-torch.square(heading_err / max(max_heading_err, 1e-3)))
-    slow = torch.exp(-torch.square(horiz / max(max_horiz_speed, 1e-3)))
-    quiet = torch.exp(-(joint_vel2 / max(max_joint_vel2, 1e-3)))
-    vz_ok = torch.exp(-torch.square(vz / 0.45))
-    fz = forces[:, :, 2].abs().max(dim=-1).values
-    impact_pen = (fz / max(impact_force_scale, 1.0)).clamp(0.0, 1.0)
-
-    score = (
-        0.30 * height_track
-        + 0.20 * upright_exp
-        + 0.20 * heading_exp
-        + 0.12 * slow
-        + 0.10 * quiet
-        + 0.08 * vz_ok
-        - 0.05 * impact_pen
-    )
-    urgency = torch.ones(env.num_envs, device=env.device)
-    if post_steps is not None:
-        urgency = 1.0 + 0.5 * (1.0 - (post_steps.float() / max(window, 1)).clamp(0.0, 1.0))
-
-    return touch_bonus + in_window.float() * both_contact.float() * urgency * score * land_scale
-
-
-def no_flight_timeout_penalty(env: ManagerBasedRLEnv) -> torch.Tensor:
-    """Sparse −1 on the last step if the episode timed out with no true flight."""
-    max_len = int(getattr(env, "max_episode_length", 0) or 0)
-    ep_len = getattr(env, "episode_length_buf", None)
-    if max_len <= 0 or ep_len is None:
-        return torch.zeros(env.num_envs, device=env.device)
-
-    at_timeout = ep_len >= (max_len - 1)
-    had_flight = getattr(env, "_ep_had_flight", None)
-    if had_flight is None:
-        return torch.zeros(env.num_envs, device=env.device)
-    return (at_timeout & (~had_flight)).float()
-
-
-# ---------------------------------------------------------------------------
-# Jump sparse success criteria
-# ---------------------------------------------------------------------------
+    cache = _jump_cache(env)
+    if cache is not None and "pitch" in cache:
+        return cache["pitch"]
+    return _forward_pitch_b(env.scene[asset_cfg.name])
 
 
 def _once_success(env: ManagerBasedRLEnv, attr: str, latch_attr: str) -> torch.Tensor:
@@ -746,85 +199,375 @@ def _once_success(env: ManagerBasedRLEnv, attr: str, latch_attr: str) -> torch.T
     return hit.float()
 
 
-def success_rise(
+# ---------------------------------------------------------------------------
+# Jump dense shaping (8-term set)
+# ---------------------------------------------------------------------------
+
+
+def takeoff_launch(
     env: ManagerBasedRLEnv,
     command_name: str = "jump",
-    once_per_episode: bool = True,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
+    contact_force_threshold: float = 5.0,
+    vel_std: float = 1.0,
+    vz_overshoot: float = 0.35,
+    pitch_std: float = 0.12,
+    clean_omega0: float = 2.2,
+    knee_coil_target: float = 1.05,
+    knee_coil_std: float = 0.40,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """+1 once when peak sole clearance meets commanded ``h_obstacle``."""
-    del command_name, once_per_episode
-    return _once_success(env, "success_rise", "_ep_rise_ok")
+    """Launch shaping: coil (knee) + approach ``(v_x*, v_z*)`` and lift off cleanly.
 
+    Plant/push pay is scaled by knee coil so stiff upright rabbit hops earn less
+    than a crouched load before takeoff.
+    """
+    phase = _ep_phase(env)
+    in_pp = (phase == 1) | (phase == 2)
+    in_rise = phase == 3
+    asset = env.scene[asset_cfg.name]
+    term = _jump_term(env, command_name)
+    both_air = _both_feet_air_cached(env, sensor_cfg, contact_force_threshold)
+    contacts = foot_contact_mask(
+        env, sensor_cfg=sensor_cfg, contact_force_threshold=contact_force_threshold
+    )
+    left_c = contacts[:, 0]
 
-def success_tuck(
-    env: ManagerBasedRLEnv,
-    command_name: str = "jump",
-    once_per_episode: bool = True,
-) -> torch.Tensor:
-    """+1 once when both legs' min airborne tuck meet ``tuck_apex*``."""
-    del command_name, once_per_episode
-    return _once_success(env, "success_tuck", "_ep_tuck_ok")
+    target_v = term.target_vel_b
+    vel_b = quat_apply_inverse(asset.data.root_quat_w, asset.data.root_lin_vel_w)
+    vz_err = vel_b[:, 2] - target_v[:, 2]
+    vz_err = torch.where(vz_err > vz_overshoot, vz_err + (vz_err - vz_overshoot), vz_err)
+    err_xy = torch.sum(torch.square(vel_b[:, :2] - target_v[:, :2]), dim=1)
+    err = err_xy + torch.square(vz_err)
+    vel_track = torch.exp(-err / max(vel_std, 1e-3))
+    ascending = (asset.data.root_lin_vel_w[:, 2] > 0.0).float()
+    clean = _clean_takeoff_scale(asset, clean_omega0)
+    pitch = _forward_pitch_cached(env, asset_cfg)
+    pitch_err = pitch - term.pitch_takeoff_star
+    pitch_track = torch.exp(-torch.square(pitch_err / max(pitch_std, 1e-3)))
 
-
-def success_apex(
-    env: ManagerBasedRLEnv,
-    command_name: str = "jump",
-    once_per_episode: bool = True,
-) -> torch.Tensor:
-    """+1 once when full tucked-apex success latches (rise + tuck + anti-splits)."""
-    del command_name, once_per_episode
-    cleared = getattr(env, "_ep_cleared_apex", None)
-    if cleared is None:
-        return torch.zeros(env.num_envs, device=env.device)
-    if not hasattr(env, "_jump_success_apex_given"):
-        env._jump_success_apex_given = torch.zeros(
-            env.num_envs, dtype=torch.bool, device=env.device
+    jmap = getattr(env, "joint_order_map", None)
+    if jmap is not None:
+        dof = jmap.to_g1(asset.data.joint_pos)
+        knee_flex = 0.5 * (dof[:, 3] + dof[:, 9])
+    else:
+        knee_flex = torch.full(
+            (env.num_envs,), float(knee_coil_target), device=env.device
         )
-    fresh = _ep_fresh_mask(env)
-    env._jump_success_apex_given = env._jump_success_apex_given & (~fresh)
-    hit = cleared & (~env._jump_success_apex_given)
-    env._jump_success_apex_given = env._jump_success_apex_given | hit
-    return hit.float()
+    knee_coil = torch.exp(
+        -torch.square((knee_flex - float(knee_coil_target)) / max(knee_coil_std, 1e-3))
+    )
+    # Floor at 0.35 so stiff plant still gets some signal, but crouch pays more.
+    coil_scale = 0.35 + 0.65 * knee_coil
+
+    grounded = (
+        in_pp.float()
+        * left_c.float()
+        * (~both_air).float()
+        * vel_track
+        * pitch_track
+        * coil_scale
+    )
+    air = (
+        in_rise.float()
+        * both_air.float()
+        * ascending
+        * clean
+        * vel_track
+        * pitch_track
+    )
+    return grounded + air
 
 
-def success_flight_distance(
+def obstacle_clearance(
     env: ManagerBasedRLEnv,
     command_name: str = "jump",
-    once_per_episode: bool = True,
+    overshoot: float = 1.25,
+    overshoot_weight: float = 1.5,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """+1 once when heading-aligned liftoff→landing distance ≥ commanded flight_distance."""
-    del command_name
-    if not hasattr(env, "_jump_success_dist_given"):
-        env._jump_success_dist_given = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
-    env._jump_success_dist_given = env._jump_success_dist_given & (~_ep_fresh_mask(env))
+    """Two-sided sole clearance: reward up to ``h``, penalize ballooning past ``1.25×h``.
 
-    ok = getattr(env, "_ep_cleared_distance", None)
-    if ok is None:
+    ``clamp(peak_sole / h, 0, 1) - overshoot_weight * relu(peak_sole / h - overshoot)``.
+    """
+    del asset_cfg
+    has_liftoff = getattr(env, "_ep_has_liftoff", None)
+    has_landed = getattr(env, "_ep_has_landed", None)
+    if has_liftoff is None:
         return torch.zeros(env.num_envs, device=env.device)
-    hit = ok & (~env._jump_success_dist_given)
-    if once_per_episode:
-        env._jump_success_dist_given = env._jump_success_dist_given | hit
-    return hit.float()
+    active = has_liftoff.clone()
+    if has_landed is not None:
+        active = active & (~has_landed)
+
+    peak_sole = getattr(env, "_ep_peak_foot_z", None)
+    if peak_sole is None:
+        return torch.zeros(env.num_envs, device=env.device)
+    peak = peak_sole.max(dim=-1).values
+    try:
+        h = _jump_term(env, command_name).h_obstacle.clamp(min=0.05)
+    except (KeyError, AttributeError):
+        return torch.zeros(env.num_envs, device=env.device)
+
+    ratio = peak / h
+    reward = ratio.clamp(0.0, 1.0) - float(overshoot_weight) * (ratio - float(overshoot)).clamp(min=0.0)
+    return active.float() * reward
 
 
-def success_stable_landing(
+# Backward-compatible alias.
+foot_clearance = obstacle_clearance
+
+
+def flight_distance_progress(
     env: ManagerBasedRLEnv,
     command_name: str = "jump",
-    once_per_episode: bool = True,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
+    contact_force_threshold: float = 5.0,
+    max_sep: float = FOOT_SEP_MAX_FLIGHT,
 ) -> torch.Tensor:
-    """+1 once when idle standing is reached within the post-landing window.
+    """Dense heading progress toward commanded flight distance during flight."""
+    del max_sep
+    term = _jump_term(env, command_name)
+    target = term.flight_distance.clamp(min=0.1)
+    flown = getattr(env, "_ep_flight_distance", None)
+    if flown is not None:
+        dist = torch.maximum(flown, term.progress.clamp(min=0.0))
+    else:
+        dist = term.progress.clamp(min=0.0)
+    both_air = _both_feet_air_cached(env, sensor_cfg, contact_force_threshold)
+    has_liftoff = getattr(env, "_ep_has_liftoff", None)
+    has_landed = getattr(env, "_ep_has_landed", None)
+    active = both_air
+    if has_liftoff is not None:
+        active = active & has_liftoff
+    # Cut after first land so a second hop cannot re-farm flight_distance.
+    if has_landed is not None:
+        active = active & (~has_landed)
+    max_sep_ep = getattr(env, "_ep_max_foot_sep_flight", None)
+    sep_cap = foot_sep_flight_max(term.flight_distance)
+    if max_sep_ep is not None:
+        active = active & (max_sep_ep <= sep_cap)
+    else:
+        active = active & (_foot_sep_cached(env) <= sep_cap)
+    return active.float() * (dist / target).clamp(0.0, 1.2)
 
-    Dense ``land_and_idle`` still shapes this; full-success does not require it yet.
+
+def heading_keep(
+    env: ManagerBasedRLEnv,
+    command_name: str = "jump",
+    std: float = 0.35,
+) -> torch.Tensor:
+    """Dense reward for keeping yaw aligned with episode-start heading.
+
+    Cut after first landing so bounce-walk +x no longer farms heading.
+    """
+    term = _jump_term(env, command_name)
+    err = term.heading_error.abs()
+    r = torch.exp(-torch.square(err / max(std, 1e-3)))
+    has_landed = getattr(env, "_ep_has_landed", None)
+    if has_landed is not None:
+        r = r * (~has_landed).float()
+    return r
+
+
+def land_absorb(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    command_name: str = "jump",
+    stand_height: float = 0.75,
+    absorb_height: float = 0.62,
+    height_std: float = 0.08,
+    contact_force_threshold: float = 5.0,
+    impact_force_scale: float = 400.0,
+    min_height: float = 0.56,
+    max_height: float = 0.95,
+    max_horiz_speed: float = 0.40,
+    max_joint_vel2: float = 35.0,
+    max_heading_err: float = 0.35,
+    absorb_steps: int = 12,
+    pay_steps: int = 120,
+    knee_absorb_target: float = 1.15,
+    knee_absorb_std: float = 0.35,
+    absorb_pitch_target: float = 0.35,
+    absorb_pitch_std: float = 0.15,
+) -> torch.Tensor:
+    """Pure-positive crouch absorb → stand still after a real flight.
+
+    Early frames: lower CoM + knee flex + forward lean.
+    Later frames: stand height + slow + quiet (path to stop in 1–2 steps).
+    Dense pay lasts through ``pay_steps`` (~2.4 s). Bounce-walk is handled by
+    the ``bounce_walk`` termination — this term never subtracts.
     """
     del command_name
-    if not hasattr(env, "_jump_success_stable_given"):
-        env._jump_success_stable_given = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
-    env._jump_success_stable_given = env._jump_success_stable_given & (~_ep_fresh_mask(env))
+    has_landed = getattr(env, "_ep_has_landed", None)
+    post_steps = getattr(env, "_ep_post_land_steps", None)
+    if has_landed is None:
+        return torch.zeros(env.num_envs, device=env.device)
+
+    had_flight = getattr(env, "_ep_had_flight", None)
+    if had_flight is None:
+        had_flight = has_landed
+
+    pay_horizon = max(int(pay_steps), 1)
+    absorb = max(int(absorb_steps), 1)
+    in_window = has_landed & had_flight
+    if post_steps is not None:
+        in_window = in_window & (post_steps <= pay_horizon)
+
+    asset = env.scene[asset_cfg.name]
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    forces = contact_sensor.data.net_forces_w[:, sensor_cfg.body_ids, :]
+    force_mag = torch.norm(forces, dim=-1)
+    both_contact = (force_mag > contact_force_threshold).all(dim=-1)
+
+    height = asset.data.root_pos_w[:, 2]
+    height_ok = (height > min_height) & (height < max_height)
+
+    if post_steps is not None:
+        absorb_w = (1.0 - (post_steps.float() / float(absorb)).clamp(0.0, 1.0))
+        settle_w = 1.0 - absorb_w
+        height_target = absorb_w * float(absorb_height) + settle_w * float(stand_height)
+        pitch_target = absorb_w * float(absorb_pitch_target) + settle_w * 0.08
+    else:
+        absorb_w = torch.ones(env.num_envs, device=env.device)
+        settle_w = torch.zeros(env.num_envs, device=env.device)
+        height_target = torch.full_like(height, float(absorb_height))
+        pitch_target = torch.full_like(height, float(absorb_pitch_target))
+
+    height_track = torch.exp(-torch.square(height - height_target) / (height_std**2))
+
+    pitch = _forward_pitch_cached(env, asset_cfg)
+    pitch_track = torch.exp(
+        -torch.square((pitch - pitch_target) / max(absorb_pitch_std, 1e-3))
+    )
+    pitch_track = pitch_track * (pitch >= -0.05).float()
+
+    jmap = getattr(env, "joint_order_map", None)
+    if jmap is not None:
+        dof = jmap.to_g1(asset.data.joint_pos)
+        knee_flex = 0.5 * (dof[:, 3] + dof[:, 9])
+    else:
+        names = list(asset.data.joint_names)
+        try:
+            li = names.index("left_knee_joint")
+            ri = names.index("right_knee_joint")
+            knee_flex = 0.5 * (asset.data.joint_pos[:, li] + asset.data.joint_pos[:, ri])
+        except ValueError:
+            knee_flex = torch.full(
+                (env.num_envs,), float(knee_absorb_target), device=env.device
+            )
+    knee_absorb = torch.exp(
+        -torch.square((knee_flex - float(knee_absorb_target)) / max(knee_absorb_std, 1e-3))
+    )
+
+    horiz = torch.linalg.norm(asset.data.root_lin_vel_w[:, :2], dim=-1)
+    vz = asset.data.root_lin_vel_w[:, 2].abs()
+    joint_vel2 = torch.sum(torch.square(asset.data.joint_vel), dim=1)
+    slow = torch.exp(-torch.square(horiz / max(max_horiz_speed, 1e-3)))
+    quiet = torch.exp(-(joint_vel2 / max(max_joint_vel2, 1e-3)))
+    vz_ok = torch.exp(-torch.square(vz / 0.30))
+    fz = forces[:, :, 2].abs().max(dim=-1).values
+    impact_pen = (fz / max(impact_force_scale, 1.0)).clamp(0.0, 1.0)
+
+    try:
+        heading_err = _jump_term(env, "jump").heading_error.abs()
+    except (KeyError, AttributeError):
+        heading_err = torch.zeros(env.num_envs, device=env.device)
+    heading_exp = torch.exp(-torch.square(heading_err / max(max_heading_err, 1e-3)))
+
+    if not hasattr(env, "_jump_land_touch_given"):
+        env._jump_land_touch_given = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+    env._jump_land_touch_given = env._jump_land_touch_given & (~_ep_fresh_mask(env))
+    crouch_touch = (knee_flex >= 0.80) | (height <= float(absorb_height) + 0.08)
+    touch = (
+        both_contact
+        & had_flight
+        & has_landed
+        & height_ok
+        & crouch_touch
+        & (~env._jump_land_touch_given)
+    )
+    env._jump_land_touch_given = env._jump_land_touch_given | touch
+    touch_bonus = touch.float() * 0.5
+
+    # Early crouch; later stand-still. Settle weights dominate so stopping pays.
+    # Extra plant-hold so staying both-feet-down outranks a second hop.
+    score = (
+        0.14 * height_track
+        + 0.12 * (absorb_w * knee_absorb)
+        + 0.08 * (absorb_w * pitch_track)
+        + 0.06 * heading_exp
+        + 0.28 * (settle_w * slow)
+        + 0.16 * (settle_w * quiet)
+        + 0.12 * (settle_w * vz_ok)
+        + 0.04 * (absorb_w * slow)
+        - 0.04 * impact_pen
+    ).clamp(min=0.0)
+    plant_hold = 0.20 * both_contact.float()
+
+    return (
+        touch_bonus
+        + in_window.float() * height_ok.float() * (both_contact.float() * score + plant_hold)
+    )
+
+
+# Backward-compatible alias.
+land_and_idle = land_absorb
+
+
+# ---------------------------------------------------------------------------
+# Jump sparse success
+# ---------------------------------------------------------------------------
+
+
+def success_clear(
+    env: ManagerBasedRLEnv,
+    command_name: str = "jump",
+    once_per_episode: bool = True,
+) -> torch.Tensor:
+    """+1 once when sole clearance ≥ h AND heading-aligned distance ≥ command."""
+    del command_name
+    if not hasattr(env, "_jump_success_clear_given"):
+        env._jump_success_clear_given = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+    env._jump_success_clear_given = env._jump_success_clear_given & (~_ep_fresh_mask(env))
+
+    rise = getattr(env, "_ep_rise_ok", None)
+    dist = getattr(env, "_ep_cleared_distance", None)
+    if rise is None or dist is None:
+        return torch.zeros(env.num_envs, device=env.device)
+    ok = rise & dist
+    hit = ok & (~env._jump_success_clear_given)
+    if once_per_episode:
+        env._jump_success_clear_given = env._jump_success_clear_given | hit
+    return hit.float()
+
+
+def success_land_stable(
+    env: ManagerBasedRLEnv,
+    command_name: str = "jump",
+    once_per_episode: bool = True,
+) -> torch.Tensor:
+    """+1 once when idle standing latches after a soft landing."""
+    del command_name
+    if not hasattr(env, "_jump_success_land_stable_given"):
+        env._jump_success_land_stable_given = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+    env._jump_success_land_stable_given = env._jump_success_land_stable_given & (
+        ~_ep_fresh_mask(env)
+    )
 
     ok = getattr(env, "_ep_stable_ok", None)
+    soft = getattr(env, "_ep_had_good_landing", None)
     if ok is None:
         return torch.zeros(env.num_envs, device=env.device)
-    hit = ok & (~env._jump_success_stable_given)
+    if soft is not None:
+        ok = ok & soft
+    hit = ok & (~env._jump_success_land_stable_given)
     if once_per_episode:
-        env._jump_success_stable_given = env._jump_success_stable_given | hit
+        env._jump_success_land_stable_given = env._jump_success_land_stable_given | hit
     return hit.float()

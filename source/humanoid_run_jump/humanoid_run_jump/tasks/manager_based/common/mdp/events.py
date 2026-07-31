@@ -17,6 +17,34 @@ if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
 
 
+def _yaw_from_wxyz(quat_wxyz: torch.Tensor) -> torch.Tensor:
+    """Extract Z-yaw (rad) from a batch of wxyz quaternions."""
+    w, x, y, z = quat_wxyz.unbind(-1)
+    return torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+
+def _apply_yaw_wxyz(quat_wxyz: torch.Tensor, dyaw: torch.Tensor) -> torch.Tensor:
+    """Left-multiply ``quat_wxyz`` by a pure Z yaw of ``dyaw`` (radians).
+
+    Returns a **new** ``(N, 4)`` wxyz tensor. Must not write through ``unbind``
+    views into ``quat_wxyz`` — in-place assignment corrupts the last component
+    because ``w0`` aliases ``quat[:, 0]`` / ``pose[:, 3]``.
+    """
+    half = dyaw * 0.5
+    qw = torch.cos(half)
+    qz = torch.sin(half)
+    w0, x0, y0, z0 = quat_wxyz.unbind(-1)
+    return torch.stack(
+        [
+            qw * w0 - qz * z0,
+            qw * x0 + qz * y0,
+            qw * y0 - qz * x0,
+            qw * z0 + qz * w0,
+        ],
+        dim=-1,
+    )
+
+
 def reset_root_and_joints(
     env: ManagerBasedEnv,
     env_ids: torch.Tensor,
@@ -38,17 +66,8 @@ def reset_root_and_joints(
     root_state[:, 0] += sample_uniform(*ranges.get("x", (0.0, 0.0)), n, env.device)
     root_state[:, 1] += sample_uniform(*ranges.get("y", (0.0, 0.0)), n, env.device)
     yaw = sample_uniform(*ranges.get("yaw", (0.0, 0.0)), n, env.device)
-    # Apply yaw about Z to default quat (wxyz).
-    half = yaw * 0.5
-    qw = torch.cos(half)
-    qz = torch.sin(half)
-    q = root_state[:, 3:7]
-    # Multiply default * yaw: (qw,0,0,qz) ⊗ q
-    w0, x0, y0, z0 = q.unbind(-1)
-    root_state[:, 3] = qw * w0 - qz * z0
-    root_state[:, 4] = qw * x0 + qz * y0
-    root_state[:, 5] = qw * y0 - qz * x0
-    root_state[:, 6] = qw * z0 + qz * w0
+    # Multiply default * yaw about Z (wxyz); assign a fresh quat (no in-place unbind).
+    root_state[:, 3:7] = _apply_yaw_wxyz(root_state[:, 3:7], yaw)
 
     if velocity_range is None:
         velocity_range = {"x": (-0.2, 0.2), "y": (-0.2, 0.2), "z": (-0.1, 0.1)}
@@ -150,16 +169,8 @@ def reset_from_reference(
     root_pos[:, 0] += sample_uniform(*pose_range.get("x", (0.0, 0.0)), n, env.device)
     root_pos[:, 1] += sample_uniform(*pose_range.get("y", (0.0, 0.0)), n, env.device)
 
-    root_quat = frame["root_rot"].clone()
     yaw = sample_uniform(*pose_range.get("yaw", (0.0, 0.0)), n, env.device)
-    half = yaw * 0.5
-    qw = torch.cos(half)
-    qz = torch.sin(half)
-    w0, x0, y0, z0 = root_quat.unbind(-1)
-    root_quat[:, 0] = qw * w0 - qz * z0
-    root_quat[:, 1] = qw * x0 + qz * y0
-    root_quat[:, 2] = qw * y0 - qz * x0
-    root_quat[:, 3] = qw * z0 + qz * w0
+    root_quat = _apply_yaw_wxyz(frame["root_rot"], yaw)
 
     root_pose = torch.cat([root_pos, root_quat], dim=-1)
     root_vel = torch.cat([frame["root_lin_vel"], frame["root_ang_vel"]], dim=-1)
@@ -191,6 +202,11 @@ def reset_from_runin_bank(
     stores root pose with XY relative to env origin, root velocity, and dofs in
     ``G1_JOINT_NAMES`` order. Intended to run *after* :func:`reset_root_and_joints`
     so the complementary ``1 - bank_prob`` fraction keeps standing resets.
+
+    Canonicalizes heading to world +x (plus ``pose_range`` yaw noise). After
+    reset, :class:`~humanoid_run_jump.tasks.manager_based.common.mdp.commands.JumpCommand`
+    freezes flight progress along the robot's front at resample — jump direction
+    is the reset heading, not a fixed world axis independent of facing.
     """
     if len(env_ids) == 0 or bank_prob <= 0.0:
         return
@@ -251,16 +267,9 @@ def reset_from_runin_bank(
 
     # Canonicalize heading to +x (plus yaw noise). Bank yaw can be arbitrary
     # because the frozen run actor drifts; rotate by the delta, not by noise alone.
-    w0, x0, y0, z0 = root_pose[:, 3:7].unbind(-1)
-    bank_yaw = torch.atan2(2.0 * (w0 * z0 + x0 * y0), 1.0 - 2.0 * (y0 * y0 + z0 * z0))
+    bank_yaw = _yaw_from_wxyz(root_pose[:, 3:7])
     dyaw = sample_uniform(*pose_range.get("yaw", (0.0, 0.0)), n, env.device) - bank_yaw
-    half = dyaw * 0.5
-    qw = torch.cos(half)
-    qz = torch.sin(half)
-    root_pose[:, 3] = qw * w0 - qz * z0
-    root_pose[:, 4] = qw * x0 + qz * y0
-    root_pose[:, 5] = qw * y0 - qz * x0
-    root_pose[:, 6] = qw * z0 + qz * w0
+    root_pose[:, 3:7] = _apply_yaw_wxyz(root_pose[:, 3:7], dyaw)
 
     # Bank velocities are world-frame; rotate XY lin/ang vel by the same dyaw
     # so heading and velocity stay consistent after re-anchoring.

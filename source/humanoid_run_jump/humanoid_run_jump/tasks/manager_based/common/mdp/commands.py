@@ -27,6 +27,8 @@ from humanoid_run_jump.tasks.manager_based.common.mdp.jump_envelope import (
     map_takeoff_targets,
     pitch_apex_target,
     pitch_takeoff_target,
+    push_fold_target,
+    swing_ext_target,
     tuck_apex_target,
 )
 
@@ -62,11 +64,11 @@ class JumpCommand(CommandTerm):
         self.heading_error = torch.zeros(self.num_envs, device=self.device)
         self.progress = torch.zeros(self.num_envs, device=self.device)
         self.v_x_star = torch.zeros(self.num_envs, device=self.device)
-        self.v_y_star = torch.zeros(self.num_envs, device=self.device)
         self.v_z_star = torch.zeros(self.num_envs, device=self.device)
-        self.crouch_star = torch.zeros(self.num_envs, device=self.device)
         self.apex_rise_star = torch.zeros(self.num_envs, device=self.device)
         self.tuck_apex_star = torch.zeros(self.num_envs, device=self.device)
+        self.push_fold_star = torch.zeros(self.num_envs, device=self.device)
+        self.swing_ext_star = torch.zeros(self.num_envs, device=self.device)
         self.pitch_takeoff_star = torch.zeros(self.num_envs, device=self.device)
         self.pitch_apex_star = torch.zeros(self.num_envs, device=self.device)
 
@@ -89,8 +91,10 @@ class JumpCommand(CommandTerm):
 
     @property
     def target_vel_b(self) -> torch.Tensor:
-        """Mapped takeoff velocity ``[v_x*, v_y*, v_z*]`` in body frame."""
-        return torch.stack([self.v_x_star, self.v_y_star, self.v_z_star], dim=-1)
+        """Mapped takeoff velocity ``[v_x*, 0, v_z*]`` in body frame."""
+        return torch.stack(
+            [self.v_x_star, torch.zeros_like(self.v_x_star), self.v_z_star], dim=-1
+        )
 
     def __str__(self) -> str:
         return f"JumpCommand(h, flight_dist) n={self.num_envs}"
@@ -128,9 +132,11 @@ class JumpCommand(CommandTerm):
         flight = clamp_flight_distance(
             torch.empty(n, device=self.device).uniform_(*r.flight_distance), h
         )
-        vx_star, vy_star, vz_star, crouch_star = map_takeoff_targets(h)
+        vx_star, _, vz_star, _ = map_takeoff_targets(h)
         rise_star = apex_rise_target(h)
         tuck_star = tuck_apex_target(h)
+        push_star = push_fold_target(h)
+        swing_star = swing_ext_target(h)
         pitch_to_star = pitch_takeoff_target(h)
         pitch_ap_star = pitch_apex_target(h)
 
@@ -145,11 +151,11 @@ class JumpCommand(CommandTerm):
         self._command[env_ids, 1] = flight
 
         self.v_x_star[env_ids] = vx_star
-        self.v_y_star[env_ids] = vy_star
         self.v_z_star[env_ids] = vz_star
-        self.crouch_star[env_ids] = crouch_star
         self.apex_rise_star[env_ids] = rise_star
         self.tuck_apex_star[env_ids] = tuck_star
+        self.push_fold_star[env_ids] = push_star
+        self.swing_ext_star[env_ids] = swing_star
         self.pitch_takeoff_star[env_ids] = pitch_to_star
         self.pitch_apex_star[env_ids] = pitch_ap_star
         self.progress[env_ids] = 0.0

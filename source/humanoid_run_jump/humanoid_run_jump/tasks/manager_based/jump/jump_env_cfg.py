@@ -46,8 +46,13 @@ JUMP_ENVELOPE_EASY = JumpCommandCfg.Ranges(
     h_obstacle=(0.25, 0.50),
     flight_distance=(0.50, 0.90),
 )
-# Play: 0.5 m height, mid-range flight distance (valid: cap(0.5)=1.20).
+# Play: easy mid-band for diagnosis (matches early train distribution).
+# Hard target remains h=0.50 / flight=1.00 once landing is solved.
 JUMP_PLAY_CMD = JumpCommandCfg.Ranges(
+    h_obstacle=(0.40, 0.40),
+    flight_distance=(0.70, 0.70),
+)
+JUMP_PLAY_CMD_HARD = JumpCommandCfg.Ranges(
     h_obstacle=(0.50, 0.50),
     flight_distance=(1.00, 1.00),
 )
@@ -105,6 +110,8 @@ class ObservationsCfg:
     class PolicyCfg(ObsGroup):
         # proprio(64) + jump_commands(22) + foot_contacts(2) + foot_air_time(2)
         # + base_height(1) + base_lin_vel_z(1) + actions(64) = 156
+        # jump_commands: h,flight,heading,progress,vx,vz,rise,push,swing,pitch,
+        #                peak_rise,tuck_l,tuck_r,phase(7),liftoff,landed
         proprio = ObsTerm(func=mdp.reduced_coords_proprio, noise=Unoise(n_min=-0.01, n_max=0.01))
         jump_commands = ObsTerm(func=mdp.jump_commands, params={"command_name": "jump"})
         foot_contacts = ObsTerm(
@@ -152,168 +159,119 @@ class EventCfg:
 
 @configclass
 class RewardsCfg:
-    """Phase-gated jump MDP: prep → plant/push → tucked apex → extend → land."""
+    """Minimal jump MDP: clear h, travel d, land, stand. Pose style → AMP."""
 
-    # --- Phase-structured dense shaping ---
-    prep_step = RewTerm(
-        func=mdp.prep_step,
-        weight=4.0,
-        params={
-            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
-            "min_lead_m": 0.04,
-            "air_penalty": 1.0,
-        },
-    )
-    plant_push = RewTerm(
-        func=mdp.plant_push,
-        weight=6.0,
-        params={
-            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
-            "min_lead_m": 0.04,
-            "push_vz_min": 0.25,
-        },
-    )
-    # Sparse +1 left takeoff (right-foot takeoff is illegal_takeoff).
-    takeoff_foot = RewTerm(
-        func=mdp.takeoff_foot,
-        weight=10.0,
-    )
-    takeoff_launch = RewTerm(
+    takeoff = RewTerm(
         func=mdp.takeoff_launch,
-        weight=5.0,
+        weight=10.0,
         params={
             "command_name": "jump",
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
             "vel_std": 1.0,
-            "vz_overshoot": 0.15,
+            "vz_overshoot": 0.35,
             "pitch_std": 0.12,
             "clean_omega0": 2.2,
         },
     )
-    apex_tuck = RewTerm(
-        func=mdp.apex_tuck,
-        weight=28.0,
-        params={"command_name": "jump", "tuck_std": 0.15, "pitch_std": 0.12},
-    )
-    apex_pitch = RewTerm(
-        func=mdp.apex_pitch,
-        weight=14.0,
-        params={"command_name": "jump", "pitch_std": 0.12},
-    )
-    foot_clearance = RewTerm(
-        func=mdp.foot_clearance,
-        weight=10.0,
+    obstacle_clearance = RewTerm(
+        func=mdp.obstacle_clearance,
+        weight=12.0,
         params={"command_name": "jump"},
-    )
-    excess_height = RewTerm(
-        func=mdp.excess_height_penalty,
-        weight=-25.0,
-        params={"command_name": "jump", "margin": 0.05},
-    )
-    leg_extend = RewTerm(
-        func=mdp.leg_extend,
-        weight=10.0,
-        params={"tuck_std": 0.10},
-    )
-    extend_pitch = RewTerm(
-        func=mdp.extend_pitch,
-        weight=6.0,
-        params={"pitch_std": 0.15},
-    )
-    foot_split_penalty = RewTerm(
-        func=mdp.foot_split_penalty,
-        weight=-50.0,
     )
     flight_distance = RewTerm(
         func=mdp.flight_distance_progress,
-        weight=8.0,
+        weight=18.0,
         params={
             "command_name": "jump",
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
         },
     )
-    # Keep yaw near episode-start heading (down-weighted vs jump-quality terms).
+    land_absorb = RewTerm(
+        func=mdp.land_absorb,
+        weight=14.0,
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
+            "stand_height": 0.75,
+            "absorb_height": 0.62,
+            "min_height": 0.56,
+            "max_horiz_speed": 0.40,
+            "max_joint_vel2": 35.0,
+            "max_heading_err": 0.35,
+            "absorb_steps": 12,
+            "pay_steps": 120,
+            "knee_absorb_target": 1.15,
+            "absorb_pitch_target": 0.35,
+        },
+    )
     heading_keep = RewTerm(
         func=mdp.heading_keep,
         weight=2.0,
         params={"command_name": "jump", "std": 0.35},
     )
-    land_and_idle = RewTerm(
-        func=mdp.land_and_idle,
-        weight=12.0,
-        params={
-            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
-            "stand_height": 0.75,
-            "max_tilt_rad": 0.40,
-            "min_height": 0.68,
-            "max_horiz_speed": 0.60,
-            "max_joint_vel2": 40.0,
-            "max_heading_err": 0.35,
-        },
-    )
-    rejump_penalty = RewTerm(
-        func=mdp.rejump_penalty,
-        weight=-10.0,
-        params={
-            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
-        },
-    )
-
-    # --- Sparse success criteria ---
-    success_rise = RewTerm(
-        func=mdp.success_rise,
-        weight=10.0,
+    success_clear = RewTerm(
+        func=mdp.success_clear,
+        weight=40.0,
         params={"command_name": "jump"},
     )
-    success_tuck = RewTerm(
-        func=mdp.success_tuck,
-        weight=12.0,
+    success_land_stable = RewTerm(
+        func=mdp.success_land_stable,
+        weight=60.0,
         params={"command_name": "jump"},
     )
-    success_apex = RewTerm(
-        func=mdp.success_apex,
-        weight=20.0,
-        params={"command_name": "jump"},
-    )
-    success_distance = RewTerm(
-        func=mdp.success_flight_distance,
-        weight=12.0,
-        params={"command_name": "jump"},
-    )
-    # Idle bonus (dense land_and_idle shapes; not yet part of truncation gate).
-    success_stable = RewTerm(
-        func=mdp.success_stable_landing,
-        weight=8.0,
-        params={"command_name": "jump"},
-    )
-
-    # --- Regularizers ---
     action_rate = RewTerm(func=mdp.action_rate_l2, weight=-0.01)
-    no_flight_timeout = RewTerm(func=mdp.no_flight_timeout_penalty, weight=-15.0)
 
 
 @configclass
 class TerminationsCfg:
     # Must be first: refreshes phase / latches before rewards and other terms.
-    update_jump_state = DoneTerm(func=mdp.update_jump_state)
+    # Full AMP style in every phase — AMP is the sole pose teacher.
+    update_jump_state = DoneTerm(
+        func=mdp.update_jump_state,
+        params={
+            "flight_style_scale": 1.0,
+            "land_style_scale": 1.0,
+            "land_absorb_min_height": 0.56,
+            "land_absorb_steps": 12,
+            "land_max_forward_pitch": 0.60,
+            "land_min_pitch": -0.05,
+            "land_max_roll": 0.25,
+            "land_knee_min": 0.75,
+            "land_crouch_max_height": 0.72,
+            "land_max_horiz_speed": 1.15,
+        },
+    )
     time_out = DoneTerm(func=time_out, time_out=True)
-    # Truncate on apex + distance + soft landing (feet, upright, heading) — not a failure.
+    # Truncate on apex + distance + soft land + stable idle — not a failure.
     success = DoneTerm(func=mdp.jump_success, time_out=True)
-    # Cap settle frames after landing (~2 s) so rollouts stay jump-dense.
+    # Cap settle frames after landing (~3 s) so rollouts stay jump-dense.
     post_land_timeout = DoneTerm(
         func=mdp.post_land_timeout,
         time_out=True,
-        params={"max_post_land_steps": 100},
+        params={"max_post_land_steps": 150},
+    )
+    # Fail double-hop early (~0.32 s); allow longer to shed forward speed (~1.4 s).
+    bounce_walk = DoneTerm(
+        func=mdp.bounce_walk,
+        params={
+            "reair_grace_steps": 16,
+            "horiz_grace_steps": 70,
+            "max_horiz_speed": 0.85,
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
+        },
     )
     illegal_takeoff = DoneTerm(func=mdp.illegal_takeoff)
     prep_timeout = DoneTerm(func=mdp.prep_timeout, params={"max_prep_steps": 50})
+    # Fail PLANT/stand farm: must leave the ground within ~2 s.
+    no_liftoff_timeout = DoneTerm(
+        func=mdp.no_liftoff_timeout, params={"max_steps": 100}
+    )
     root_height = DoneTerm(func=mdp.root_height_below, params={"minimum_height": 0.30})
     # Relaxed vs prior 1.05 so takeoff pitch/tuck is not instantly fatal.
     bad_orientation = DoneTerm(func=mdp.bad_orientation, params={"limit_angle": 1.25})
-    # Hard-fail ballistic splits far beyond CSV (soft penalty handles mild overshoot).
-    extreme_splits = DoneTerm(func=mdp.extreme_foot_split)
-    # Hard-fail balloon flights (peak sole > h + 0.25 m).
+    # Hard-fail balloon flights (peak pelvis rise > apex_rise* + 0.20 m).
     balloon_height = DoneTerm(func=mdp.balloon_height, params={"command_name": "jump"})
+    # Hard-fail ballistic splits far beyond CSV (AMP + soft sep gate handle mild).
+    extreme_splits = DoneTerm(func=mdp.extreme_foot_split)
     # Hard-fail large yaw drift after liftoff (~70° from episode-start heading).
     heading_blowout = DoneTerm(
         func=mdp.heading_blowout,
@@ -349,8 +307,9 @@ class CurriculumCfg:
         params={
             "command_name": "jump",
             "steps_to_final": 250000,
-            "unlock_progress": 0.20,
-            "relock_progress": 0.10,
+            "unlock_progress": 0.35,
+            "relock_progress": 0.20,
+            "min_landing_rate": 0.15,
             "initial_h_obstacle": JUMP_ENVELOPE_EASY.h_obstacle,
             "final_h_obstacle": JUMP_ENVELOPE.h_obstacle,
             "initial_flight_distance": JUMP_ENVELOPE_EASY.flight_distance,
@@ -379,23 +338,21 @@ class G1JumpEnvCfg(ManagerBasedRLEnvCfg):
     # Jump success metric knobs consumed by AmpManagerBasedRLEnv.
     ankle_to_sole: float = 0.05
     stand_height: float = 0.75
-    # 3 s post-landing window for idle dense/sparse (post_land_timeout truncates earlier).
+    # 3 s post-landing window for idle dense/sparse.
     post_land_window_steps: int = 150
-    # Alias kept for older configs / scripts.
-    stable_steps_required: int = 150
-    # Confirm idle for 0.3 s so flicker does not count as success.
-    idle_hold_steps: int = 15
-    # Soft-land hold (~0.1 s) so first good contacts can latch.
-    land_ok_hold_steps: int = 5
+    # Confirm idle for ~0.16 s so flicker does not count as success.
+    idle_hold_steps: int = 8
+    # Soft-land hold (~0.06 s) so first good contacts can latch.
+    land_ok_hold_steps: int = 3
     # Apex forward-pitch success band (rad).
-    pitch_apex_min: float = 0.08
-    pitch_apex_max: float = 0.40
-    # Balloon hard-fail: peak sole > h + this (m).
-    clearance_hard_extra: float = 0.25
+    pitch_apex_min: float = 0.05
+    pitch_apex_max: float = 0.35
+    # Balloon hard-fail: peak pelvis rise > apex_rise* + this (m).
+    rise_hard_extra: float = 0.20
     # PREP dead-end timeout (~1 s).
     prep_timeout_steps: int = 50
-    # Soft truncate after landing (~2 s at control dt = 0.02).
-    post_land_timeout_steps: int = 100
+    # Soft truncate after landing (~3 s at control dt = 0.02).
+    post_land_timeout_steps: int = 150
 
     def __post_init__(self):
         self.decimation = 4

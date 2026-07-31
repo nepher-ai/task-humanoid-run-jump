@@ -74,9 +74,9 @@ agent:
   value_loss_scale: 2.5
   discriminator_loss_scale: 5.0
   amp_batch_size: 512
-  # Task-heavy until hops exist; takeoff/flight still softens style via amp_style_scale.
-  task_reward_weight: 0.92
-  style_reward_weight: 0.08
+  # Task-led mix so AMP style cannot dominate while never leaving the ground.
+  task_reward_weight: 0.65
+  style_reward_weight: 0.35
   discriminator_batch_size: 4096
   discriminator_reward_scale: 1.0
   discriminator_logit_regularization_scale: 0.05

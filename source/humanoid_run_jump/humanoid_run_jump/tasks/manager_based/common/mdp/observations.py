@@ -73,8 +73,8 @@ def jump_commands(env: ManagerBasedRLEnv, command_name: str = "jump") -> torch.T
     Layout::
 
         [h_obstacle, flight_distance, heading_error, progress,
-         v_x*, v_z*, crouch*,
-         apex_rise*, tuck_apex*, pitch_apex*,
+         v_x*, v_z*,
+         apex_rise*, push_fold*, swing_ext*, pitch_apex*,
          peak_pelvis_rise_so_far, tuck_l, tuck_r,
          phase_one_hot(7), has_liftoff, has_landed]
     """
@@ -111,9 +111,9 @@ def jump_commands(env: ManagerBasedRLEnv, command_name: str = "jump") -> torch.T
             term.progress.unsqueeze(-1),
             term.v_x_star.unsqueeze(-1),
             term.v_z_star.unsqueeze(-1),
-            term.crouch_star.unsqueeze(-1),
             term.apex_rise_star.unsqueeze(-1),
-            term.tuck_apex_star.unsqueeze(-1),
+            term.push_fold_star.unsqueeze(-1),
+            term.swing_ext_star.unsqueeze(-1),
             term.pitch_apex_star.unsqueeze(-1),
             peak_rise.unsqueeze(-1),
             tuck_l.unsqueeze(-1),
@@ -182,14 +182,18 @@ def amp_obs_single(
 ) -> torch.Tensor:
     """Single-frame AMP observation used by the discriminator.
 
-    Layout (key-body locals omitted — packaged reference clips currently store
-    zeros for those channels, which made the discriminator trivially perfect)::
+    Layout::
 
         dof_pos | dof_vel | root_height | root_rot6d | root_lin_vel_b | root_ang_vel_b
+        | key_body_pos_local (4 × 3, yaw-aligned relative to root)
     """
+    from isaaclab.utils.math import quat_apply, yaw_quat
+    from humanoid_run_jump.robots.g1_constants import AMP_KEY_BODY_NAMES
+
     asset = env.scene[asset_cfg.name]
     jmap = _joint_map(env, asset_cfg)
     root_idx = asset.data.body_names.index(root_body_name)
+    body_names = list(asset.data.body_names)
 
     root_pos = asset.data.body_pos_w[:, root_idx]
     root_quat = asset.data.body_quat_w[:, root_idx]
@@ -197,6 +201,20 @@ def amp_obs_single(
     root_ang_vel_w = asset.data.root_ang_vel_w
     root_lin_vel_b = quat_apply_inverse(root_quat, root_lin_vel_w)
     root_ang_vel_b = quat_apply_inverse(root_quat, root_ang_vel_w)
+
+    # Key bodies in root-yaw frame (matches packaged reference).
+    q_yaw = yaw_quat(root_quat)
+    q_inv = q_yaw.clone()
+    q_inv[:, 3] = -q_inv[:, 3]
+    key_locals = []
+    for name in AMP_KEY_BODY_NAMES:
+        try:
+            idx = body_names.index(name)
+            rel = asset.data.body_pos_w[:, idx] - root_pos
+            key_locals.append(quat_apply(q_inv, rel))
+        except ValueError:
+            key_locals.append(torch.zeros(env.num_envs, 3, device=env.device))
+    key_flat = torch.cat(key_locals, dim=-1)
 
     return torch.cat(
         [
@@ -206,6 +224,7 @@ def amp_obs_single(
             quat_to_tan_norm(root_quat),
             root_lin_vel_b,
             root_ang_vel_b,
+            key_flat,
         ],
         dim=-1,
     )

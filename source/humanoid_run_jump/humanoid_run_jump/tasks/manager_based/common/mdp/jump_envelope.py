@@ -6,24 +6,17 @@
 """CSV-fitted jump takeoff envelope for the frozen BeyondMimic tracker.
 
 Jump CSVs are named ``jump_over_obstacle_0_5m_*`` / ``0_75m_*``. Motions are
-already retargeted to G1. CSV root positions are in **cm** (converted to m on
-load). FK / filename tags show peak lower-foot height ≈ the obstacle tag
-(≈ 0.50 m / 0.75 m) via **leg tuck** — root/pelvis only rises ~0.25–0.37 m —
-so treat ``0.50`` / ``0.75`` as **literal obstacle heights** in the robot /
-motion frame.
+already retargeted to G1. FK / filename tags show peak lower-foot height ≈ the
+obstacle tag via a **hurdle step** (push-leg fold + swing-leg extension) —
+root/pelvis only rises ~0.21–0.36 m — so treat ``0.50`` / ``0.75`` as literal
+obstacle heights in the robot / motion frame.
 
 Policy-facing jump command is ``(h_obstacle, flight_distance)``. Takeoff
-``(v_x*, v_z*, crouch*)`` bins remain internal shaping references from those
-CSV clips.
+``(v_x*, v_z*)`` bins remain internal shaping references from those CSV clips.
 
-Measured heading-aligned elevated-phase travel across ``motions/jump*.csv``
-(non-``_M`` clips)::
-
-    0.5 m clips  → horiz air ≈ 0.60–1.17 m (max 1.17 m)
-    0.75 m clips → horiz air ≈ 0.94–0.99 m
-
-So ``FLIGHT_DIST_MAX = 1.20`` and :func:`flight_cap` couple distance to height
-so the sampler never issues a combination outside the demonstrated region.
+All per-leg / arm / rise anchors below are medians over the 15 non-mirrored
+jump clips (MuJoCo FK). Interpolation spans the full ``[H_MIN, H_MAX]`` band
+so shaping targets are not frozen for the early curriculum.
 """
 
 from __future__ import annotations
@@ -31,20 +24,19 @@ from __future__ import annotations
 import torch
 
 # Tracker-safe obstacle height band (meters in the G1 motion frame).
-H_MIN = 0.0
+H_MIN = 0.25
 H_MAX = 0.75  # matches highest CSV tag (+ no headroom beyond demonstrated clips)
 
-# Anchor bins: literal CSV filename heights.
+# Anchor bins: literal CSV filename heights (lerp endpoints).
 _H_LO = 0.50
 _H_HI = 0.75
 
-# Body-frame takeoff means from those same CSV bins.
-_VX_LO, _VX_HI = 2.00, 2.10
-_VZ_LO, _VZ_HI = 1.59, 1.56
+# Body-frame takeoff means from measured CSV bins (liftoff vx / vz medians).
+_VX_LO, _VX_HI = 1.85, 1.95
+_VZ_LO, _VZ_HI = 1.72, 2.05
 _CROUCH_LO, _CROUCH_HI = 0.26, 0.34
 
 # Demonstrated heading-aligned flight distance band (liftoff → landing, m).
-# Measured max elevated-phase travel ≈ 1.17 m; use 1.20 with a small margin.
 FLIGHT_DIST_MIN = 0.50
 FLIGHT_DIST_MAX = 1.20
 
@@ -63,35 +55,43 @@ THICKNESS_MAX = 0.25
 D_OBSTACLE_MIN = 1.2
 D_OBSTACLE_MAX = 3.5
 
-# --- Tucked-apex success envelope (MuJoCo FK over non-_M jump CSVs) ---
-# Soft pelvis-rise *obs / shaping* refs only. CSV FK reports 0.21–0.29 m, but under
-# physics vz_w≈1.5–1.9 m/s only buys ~vz²/(2g) ≈ 0.12–0.18 m of CoM rise (and
-# tucking pulls the pelvis below the CoM arc). Success gates on sole clearance
-# vs ``h_obstacle`` instead — see ``AmpManagerBasedRLEnv._ep_rise_ok``.
-_APEX_RISE_LO, _APEX_RISE_HI = 0.14, 0.16
-# Max per-leg pelvis→ankle distance allowed at apex (m). Both legs must reach
-# at or below this (one-sided). Softened +5 cm vs CSV mean maxima (0.544 /
-# 0.478) so early training gets a usable gradient from a straight-leg start.
-_TUCK_APEX_LO, _TUCK_APEX_HI = 0.60, 0.55
-# Mean pelvis→ankle distance when legs are extended (liftoff / pre-landing).
+# --- Hurdle-apex success envelope (MuJoCo FK over non-_M jump CSVs) ---
+# Pelvis rise liftoff→apex: measured med 0.244 (0.5 m) / 0.303 (0.75 m).
+_APEX_RISE_LO, _APEX_RISE_HI = 0.22, 0.31
+# Push-leg (takeoff foot) max pelvis→ankle at apex (m). Measured med 0.332 / 0.307.
+_PUSH_FOLD_LO, _PUSH_FOLD_HI = 0.34, 0.30
+# Swing-leg min pelvis→ankle at apex (m). Measured med 0.668 / 0.608.
+_SWING_EXT_LO, _SWING_EXT_HI = 0.64, 0.60
+# Min |d_push − d_swing| at apex to count as a hurdle (measured med 0.296).
+APEX_ASYM_MIN = 0.22
+# Mean pelvis→ankle when the push leg opens for landing.
 TUCK_EXTENDED = 0.60  # measured 0.567–0.656 lift, 0.567–0.710 land
-# Anti-splits caps on foot-to-foot separation.
-FOOT_SEP_MAX_APEX = 0.80  # measured max 0.732 at apex
-FOOT_SEP_MAX_FLIGHT = 0.90  # measured max 0.891 over whole flight
-# Hard fail: far beyond CSV (splits farm / ballistic straddle).
-FOOT_SEP_HARD = 1.05
+# Soft penalty onset / success gate / hard fail on foot-to-foot separation.
+# Measured max over flight 0.891; widen so the reference hurdle split is legal.
+FOOT_SEP_SOFT = 0.80
+FOOT_SEP_MAX_APEX = 0.85  # measured max 0.732 at apex
+FOOT_SEP_MAX_FLIGHT = 0.95  # success gate (tightened vs splits farm)
+FOOT_SEP_HARD = 1.15  # hard fail
+# Extra sep allowance per meter of commanded flight beyond FLIGHT_DIST_MIN.
+FOOT_SEP_DIST_SCALE = 0.20
+# Balloon hard-fail: pelvis rise above target + this (m).
+RISE_HARD_EXTRA = 0.20
 
 # --- Forward torso pitch (rad): positive = lean forward (chest toward +x) ---
-# Measured from jump CSVs via atan2(-g_b_x, -g_b_z):
-#   liftoff med ≈ 0.07 / 0.14 ; apex med ≈ 0.15 / 0.16 ; land med ≈ 0.17 / 0.15
+# Measured apex med ≈ 0.145 / 0.160; clip min 0.055.
 _PITCH_TAKEOFF_LO, _PITCH_TAKEOFF_HI = 0.10, 0.14
-_PITCH_APEX_LO, _PITCH_APEX_HI = 0.18, 0.20
-# Success band for apex pitch latch (wider than the dense Gaussian target).
-PITCH_APEX_MIN = 0.08
-PITCH_APEX_MAX = 0.40
-# Soft excess sole height (m) before dense penalty; hard balloon cap above h.
+_PITCH_APEX_LO, _PITCH_APEX_HI = 0.15, 0.18
+PITCH_APEX_MIN = 0.05
+PITCH_APEX_MAX = 0.35
+# Soft excess sole height (m) before dense penalty (kept for foot_clearance).
 CLEARANCE_EXCESS_MARGIN = 0.05
-CLEARANCE_HARD_EXTRA = 0.25
+# Deprecated sole-based balloon; rise-based hard fail uses RISE_HARD_EXTRA.
+CLEARANCE_HARD_EXTRA = 0.40  # widened so sole balloon no longer rejects reference
+
+# --- Arm anchors (MuJoCo FK over airborne windows) ---
+ARM_SPAN_APEX = 0.86  # hand-to-hand span (m); measured med 0.86
+HAND_RISE_APEX = 0.36  # mean hand z above pelvis (m); measured peak up to 0.61
+ELBOW_FLIGHT = 0.45  # |elbow| target (rad); measured means 0.20–0.58
 
 
 def clamp_obstacle_height(h: torch.Tensor) -> torch.Tensor:
@@ -128,15 +128,24 @@ def clamp_thickness(thickness: torch.Tensor) -> torch.Tensor:
 
 
 def _lerp_factor(h: torch.Tensor) -> torch.Tensor:
-    """Interpolation weight in [0, 1] from low→high bins; flat below ``_H_LO``."""
-    return ((h - _H_LO) / (_H_HI - _H_LO)).clamp(0.0, 1.0)
+    """Interpolation weight in [0, 1] spanning the full ``[H_MIN, H_MAX]`` band.
+
+    Anchors below ``_H_LO`` extrapolate toward the low bin (not flat), so early
+    curriculum heights still get distinct shaping targets.
+    """
+    return ((h - H_MIN) / (H_MAX - H_MIN)).clamp(0.0, 1.0)
+
+
+def _bin_lerp(h: torch.Tensor, lo: float, hi: float) -> torch.Tensor:
+    """Lerp ``lo → hi`` over ``[_H_LO, _H_HI]``, flat outside (legacy bin map)."""
+    t = ((h - _H_LO) / (_H_HI - _H_LO)).clamp(0.0, 1.0)
+    return lo + (hi - lo) * t
 
 
 def map_takeoff_targets(h: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Map obstacle height → ``(v_x*, v_y*, v_z*, crouch*)``.
 
-    For ``h < 0.50`` uses the 0.5 m CSV bin. For ``h`` up to 0.75 lerps toward
-    the 0.75 m bin. ``v_y*`` is always 0.
+    Lerps over the full ``[H_MIN, H_MAX]`` band. ``v_y*`` is always 0.
     """
     h = clamp_obstacle_height(h)
     t = _lerp_factor(h)
@@ -148,45 +157,67 @@ def map_takeoff_targets(h: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, to
 
 
 def apex_rise_target(h: torch.Tensor) -> torch.Tensor:
-    """Soft pelvis-rise reference (m) for obs / launch shaping.
+    """Soft pelvis-rise reference (m) for obs / balloon / excess_rise.
 
-    Lerps ``0.14 → 0.16`` over ``[0.50, 0.75]`` (physics-reachable under the
-    CSV takeoff ``v_z*``). Apex *success* uses sole clearance ≥ ``h_obstacle``.
+    Lerps ``0.22 → 0.31`` over ``[H_MIN, H_MAX]`` (measured CSV medians).
     """
     h = clamp_obstacle_height(h)
     t = _lerp_factor(h)
     return _APEX_RISE_LO + (_APEX_RISE_HI - _APEX_RISE_LO) * t
 
 
-def tuck_apex_target(h: torch.Tensor) -> torch.Tensor:
-    """Max per-leg pelvis→ankle distance (m) allowed at the jump apex.
+def push_fold_target(h: torch.Tensor) -> torch.Tensor:
+    """Max push-leg pelvis→ankle distance (m) allowed at apex.
 
-    Both legs must independently reach at or below this value (one-sided).
-    Lerps ``0.60 → 0.55`` over the ``[0.50, 0.75]`` bins (+5 cm vs CSV maxima
-    for learnability; tighten later once tuck_ok_rate is healthy).
+    Lerps ``0.34 → 0.30`` over ``[H_MIN, H_MAX]``.
     """
     h = clamp_obstacle_height(h)
     t = _lerp_factor(h)
-    return _TUCK_APEX_LO + (_TUCK_APEX_HI - _TUCK_APEX_LO) * t
+    return _PUSH_FOLD_LO + (_PUSH_FOLD_HI - _PUSH_FOLD_LO) * t
+
+
+def swing_ext_target(h: torch.Tensor) -> torch.Tensor:
+    """Min swing-leg pelvis→ankle distance (m) required at apex.
+
+    Lerps ``0.64 → 0.60`` over ``[H_MIN, H_MAX]``.
+    """
+    h = clamp_obstacle_height(h)
+    t = _lerp_factor(h)
+    return _SWING_EXT_LO + (_SWING_EXT_HI - _SWING_EXT_LO) * t
+
+
+def tuck_apex_target(h: torch.Tensor) -> torch.Tensor:
+    """Alias of :func:`push_fold_target` kept for obs / command compatibility."""
+    return push_fold_target(h)
+
+
+def foot_sep_soft(flight_distance: torch.Tensor) -> torch.Tensor:
+    """Soft penalty onset for foot separation, widened by commanded flight."""
+    extra = (flight_distance - FLIGHT_DIST_MIN).clamp(min=0.0) * FOOT_SEP_DIST_SCALE
+    return torch.full_like(flight_distance, FOOT_SEP_SOFT) + extra
+
+
+def foot_sep_flight_max(flight_distance: torch.Tensor) -> torch.Tensor:
+    """Success-gate foot-sep cap, widened by commanded flight."""
+    extra = (flight_distance - FLIGHT_DIST_MIN).clamp(min=0.0) * FOOT_SEP_DIST_SCALE
+    return torch.full_like(flight_distance, FOOT_SEP_MAX_FLIGHT) + extra
+
+
+def foot_sep_hard(flight_distance: torch.Tensor) -> torch.Tensor:
+    """Hard-fail foot-sep cap, widened by commanded flight."""
+    extra = (flight_distance - FLIGHT_DIST_MIN).clamp(min=0.0) * FOOT_SEP_DIST_SCALE
+    return torch.full_like(flight_distance, FOOT_SEP_HARD) + extra
 
 
 def pitch_takeoff_target(h: torch.Tensor) -> torch.Tensor:
-    """Forward torso pitch (rad) during plant/push / early rise.
-
-    Lerps ``0.10 → 0.14`` over ``[0.50, 0.75]`` (CSV liftoff medians ~0.07/0.14;
-    target slightly above the lower bin so lean is encouraged).
-    """
+    """Forward torso pitch (rad) during plant/push / early rise."""
     h = clamp_obstacle_height(h)
     t = _lerp_factor(h)
     return _PITCH_TAKEOFF_LO + (_PITCH_TAKEOFF_HI - _PITCH_TAKEOFF_LO) * t
 
 
 def pitch_apex_target(h: torch.Tensor) -> torch.Tensor:
-    """Forward torso pitch (rad) at tucked apex.
-
-    Lerps ``0.18 → 0.20`` over ``[0.50, 0.75]`` (CSV apex medians ~0.15/0.16;
-    slight headroom so vertical tuck is not rewarded).
-    """
+    """Forward torso pitch (rad) at hurdle apex."""
     h = clamp_obstacle_height(h)
     t = _lerp_factor(h)
     return _PITCH_APEX_LO + (_PITCH_APEX_HI - _PITCH_APEX_LO) * t
@@ -195,7 +226,7 @@ def pitch_apex_target(h: torch.Tensor) -> torch.Tensor:
 def takeoff_standoff(h: torch.Tensor, thickness: torch.Tensor | None = None) -> torch.Tensor:
     """Distance from obstacle front face back to the takeoff / plant line."""
     h = clamp_obstacle_height(h)
-    t = _lerp_factor(h)
+    t = ((h - _H_LO) / (_H_HI - _H_LO)).clamp(0.0, 1.0)
     standoff = _STANDOFF_LO + (_STANDOFF_HI - _STANDOFF_LO) * t
     if thickness is not None:
         extra = (clamp_thickness(thickness) - THICKNESS_MIN).clamp(min=0.0) * 0.25
@@ -213,9 +244,16 @@ __all__ = [
     "D_OBSTACLE_MIN",
     "D_OBSTACLE_MAX",
     "TUCK_EXTENDED",
+    "APEX_ASYM_MIN",
+    "ARM_SPAN_APEX",
+    "HAND_RISE_APEX",
+    "ELBOW_FLIGHT",
+    "FOOT_SEP_SOFT",
     "FOOT_SEP_MAX_APEX",
     "FOOT_SEP_MAX_FLIGHT",
     "FOOT_SEP_HARD",
+    "FOOT_SEP_DIST_SCALE",
+    "RISE_HARD_EXTRA",
     "PITCH_APEX_MIN",
     "PITCH_APEX_MAX",
     "CLEARANCE_EXCESS_MARGIN",
@@ -226,7 +264,12 @@ __all__ = [
     "clamp_thickness",
     "map_takeoff_targets",
     "apex_rise_target",
+    "push_fold_target",
+    "swing_ext_target",
     "tuck_apex_target",
+    "foot_sep_soft",
+    "foot_sep_flight_max",
+    "foot_sep_hard",
     "pitch_takeoff_target",
     "pitch_apex_target",
     "takeoff_standoff",

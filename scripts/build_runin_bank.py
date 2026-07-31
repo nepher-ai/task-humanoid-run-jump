@@ -9,6 +9,9 @@ Rolls ``Nepher-G1-Run-Play-v0`` with ``best_policy/run/policy.pt``, snapshots
 root + joint state when the configured gait-phase trigger fires, and writes
 ``motions/packaged/runin_states.pt``.
 
+Each sample is collected under a randomly commanded forward speed drawn
+uniformly from ``[--vx-min, --vx-max]`` (default 0.5–3.0 m/s).
+
 Usage (from project root)::
 
     isaaclab.bat -p scripts/build_runin_bank.py --headless --num_envs 64 --num_samples 4096
@@ -27,7 +30,24 @@ parser.add_argument("--num_envs", type=int, default=64)
 parser.add_argument("--num_samples", type=int, default=4096)
 parser.add_argument("--max_steps", type=int, default=20000)
 parser.add_argument("--warmup_steps", type=int, default=50)
-parser.add_argument("--vx", type=float, default=2.0, help="Forward velocity command (m/s).")
+parser.add_argument(
+    "--vx-min",
+    type=float,
+    default=0.5,
+    help="Minimum forward velocity command (m/s). Default: 0.5.",
+)
+parser.add_argument(
+    "--vx-max",
+    type=float,
+    default=3.0,
+    help="Maximum forward velocity command (m/s). Default: 3.0.",
+)
+parser.add_argument(
+    "--vx",
+    type=float,
+    default=None,
+    help="If set, fix forward speed to this value (overrides --vx-min/--vx-max).",
+)
 parser.add_argument(
     "--lead",
     type=str,
@@ -104,6 +124,14 @@ def main():
     out_path = Path(args_cli.output) if args_cli.output else DEFAULT_OUT
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
+    if args_cli.vx is not None:
+        vx_lo = vx_hi = float(args_cli.vx)
+    else:
+        vx_lo = float(args_cli.vx_min)
+        vx_hi = float(args_cli.vx_max)
+    if vx_lo > vx_hi:
+        raise ValueError(f"vx-min ({vx_lo}) must be <= vx-max ({vx_hi})")
+
     # Import after AppLauncher so USD / sim are ready.
     from isaaclab.utils import configclass
     from humanoid_run_jump.tasks.manager_based.run.run_env_cfg import G1RunEnvCfg_PLAY, RunSceneCfg
@@ -129,11 +157,13 @@ def main():
     env_cfg = RunInEnvCfg()
     env_cfg.scene.num_envs = args_cli.num_envs
     env_cfg.seed = args_cli.seed
-    # Pin forward velocity for consistent run-in.
-    env_cfg.commands.base_velocity.ranges.lin_vel_x = (args_cli.vx, args_cli.vx)
+    # Random forward speed per env / resample; lateral & yaw held at 0.
+    env_cfg.commands.base_velocity.ranges.lin_vel_x = (vx_lo, vx_hi)
     env_cfg.commands.base_velocity.ranges.lin_vel_y = (0.0, 0.0)
     env_cfg.commands.base_velocity.ranges.ang_vel_z = (0.0, 0.0)
     env_cfg.commands.base_velocity.rel_standing_envs = 0.0
+    # Resample often so collected hand-offs span the speed band.
+    env_cfg.commands.base_velocity.resampling_time_range = (2.0, 4.0)
     env_cfg.curriculum.lin_vel_cmd = None
 
     env = gym.make("Nepher-G1-Run-Play-v0", cfg=env_cfg)
@@ -147,15 +177,18 @@ def main():
         expected_act_dim=TARGET_FRAME_DIM,
     )
     print(f"[runin] loaded actor from {actor.policy_path} (obs={actor.obs_dim}, act={actor.act_dim})")
+    print(f"[runin] velocity command range: lin_vel_x=[{vx_lo:.2f}, {vx_hi:.2f}] m/s")
 
     sensor_cfg = SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link")
     sensor_cfg.resolve(unwrapped.scene)
+    vel_cmd_term = unwrapped.command_manager.get_term("base_velocity")
 
     # Accumulators (G1 joint order for dof via joint_order_map).
     root_pose_buf: list[torch.Tensor] = []
     root_vel_buf: list[torch.Tensor] = []
     dof_pos_buf: list[torch.Tensor] = []
     dof_vel_buf: list[torch.Tensor] = []
+    vx_cmd_buf: list[torch.Tensor] = []
     # Per-env cooldown so we do not re-sample every step of the same plant.
     cooldown = torch.zeros(unwrapped.num_envs, dtype=torch.long, device=device)
     cooldown_steps = 25
@@ -163,7 +196,10 @@ def main():
     obs, _ = env.reset()
     collected = 0
     step = 0
-    print(f"[runin] collecting {args_cli.num_samples} samples (lead={args_cli.lead})...")
+    print(
+        f"[runin] collecting {args_cli.num_samples} samples "
+        f"(lead={args_cli.lead}, vx=[{vx_lo:.2f},{vx_hi:.2f}])..."
+    )
 
     while collected < args_cli.num_samples and step < args_cli.max_steps and simulation_app.is_running():
         with torch.inference_mode():
@@ -230,22 +266,26 @@ def main():
         root_vel = torch.cat([root_lin, root_ang], dim=-1)
         dof_pos = jmap.to_g1(asset.data.joint_pos[ids].clone())
         dof_vel = jmap.to_g1(asset.data.joint_vel[ids].clone())
+        # Commanded forward speed at the hand-off instant (per sample).
+        vx_cmd = unwrapped.command_manager.get_command("base_velocity")[ids, 0].clone()
 
         # Cap this batch so we do not overshoot.
         remain = args_cli.num_samples - collected
         take = min(int(ids.numel()), remain)
+        taken_ids = ids[:take]
         root_pose_buf.append(root_pose[:take].cpu())
         root_vel_buf.append(root_vel[:take].cpu())
         dof_pos_buf.append(dof_pos[:take].cpu())
         dof_vel_buf.append(dof_vel[:take].cpu())
-        cooldown[ids[:take]] = cooldown_steps
+        vx_cmd_buf.append(vx_cmd[:take].cpu())
+        cooldown[taken_ids] = cooldown_steps
         collected += take
         if collected % 256 < take or collected >= args_cli.num_samples:
             print(f"[runin] collected {collected}/{args_cli.num_samples} (step={step})")
 
-        # Force reset of sampled envs to diversify.
-        done = terminated | truncated
-        # Soft-reset sampled envs via write + episode length bump is hard; just continue.
+        # Resample a new random speed for sampled envs so the next hand-off
+        # from that env draws a different vx in [vx_lo, vx_hi].
+        vel_cmd_term._resample(taken_ids)
 
     env.close()
 
@@ -254,18 +294,24 @@ def main():
             "No hand-off samples collected. Check lead foot, contact sensors, and run policy."
         )
 
+    vx_cmd_all = torch.cat(vx_cmd_buf, dim=0)[: args_cli.num_samples]
     payload = {
         "root_pose": torch.cat(root_pose_buf, dim=0)[: args_cli.num_samples],
         "root_vel": torch.cat(root_vel_buf, dim=0)[: args_cli.num_samples],
         "dof_pos": torch.cat(dof_pos_buf, dim=0)[: args_cli.num_samples],
         "dof_vel": torch.cat(dof_vel_buf, dim=0)[: args_cli.num_samples],
+        "vx_cmd": vx_cmd_all,
         "lead": args_cli.lead,
-        "vx_cmd": float(args_cli.vx),
+        "vx_range": (vx_lo, vx_hi),
         "policy_path": str(policy_path),
         "num_samples": int(min(collected, args_cli.num_samples)),
     }
     torch.save(payload, out_path)
-    print(f"[runin] wrote {out_path} with {payload['num_samples']} samples (lead={args_cli.lead})")
+    print(
+        f"[runin] wrote {out_path} with {payload['num_samples']} samples "
+        f"(lead={args_cli.lead}, vx_cmd=[{float(vx_cmd_all.min()):.2f},"
+        f"{float(vx_cmd_all.max()):.2f}] mean={float(vx_cmd_all.mean()):.2f})"
+    )
 
 
 if __name__ == "__main__":

@@ -112,8 +112,18 @@ def _check_runin_bank(path: Path) -> str:
     speed = torch.linalg.norm(data["root_vel"][:, :2], dim=-1)
     dof = data["dof_pos"]
     lead = data.get("lead", "?")
+    vx_cmd = data.get("vx_cmd", None)
+    if isinstance(vx_cmd, torch.Tensor) and vx_cmd.numel() == n:
+        vx_info = (
+            f"vx_cmd=[{float(vx_cmd.min()):.2f},{float(vx_cmd.max()):.2f}] "
+            f"mean={float(vx_cmd.mean()):.2f}"
+        )
+    elif vx_cmd is not None:
+        vx_info = f"vx_cmd={vx_cmd}"
+    else:
+        vx_info = "vx_cmd=?"
     return (
-        f"OK  bank n={n} lead={lead}  "
+        f"OK  bank n={n} lead={lead}  {vx_info}  "
         f"root_z=[{root_z.min():.2f},{root_z.max():.2f}] mean={root_z.mean():.2f}  "
         f"horiz_speed=[{speed.min():.2f},{speed.max():.2f}] mean={speed.mean():.2f}  "
         f"dof_pos shape={tuple(dof.shape)} (expect N, {len(G1_JOINT_NAMES)})"

@@ -22,7 +22,7 @@ class LoggingAMP(AMP):
     weights over ``steps_to_final``. Otherwise YAML ``task_reward_weight`` /
     ``style_reward_weight`` are used as-is.
 
-    Also applies per-step ``amp_style_scale`` (takeoff/flight down-weight) and logs
+    Also applies per-step ``amp_style_scale`` (phase-dependent style gain) and logs
     flight-success rates from the env extras.
     """
 
@@ -68,9 +68,9 @@ class LoggingAMP(AMP):
                 "landing_success_rate",
                 "apex_success_rate",
                 "rise_ok_rate",
-                "tuck_ok_rate",
-                "left_tuck_ok_rate",
-                "right_tuck_ok_rate",
+                "push_fold_ok_rate",
+                "swing_ext_ok_rate",
+                "hurdle_ok_rate",
                 "splits_rate",
                 "distance_success_rate",
                 "stable_success_rate",
@@ -78,9 +78,22 @@ class LoggingAMP(AMP):
                 "apex_pitch_ok_rate",
                 "mean_peak_sole_over_h",
                 "mean_apex_pitch",
+                "mean_apex_asym",
+                "mean_sep_max",
+                "mean_arm_span_apex",
+                "mean_pelvis_rise",
             ):
                 if key in infos:
                     self.track_data(f"Jump / {key}", float(infos[key]))
+
+            # Termination / reward episode extras promoted to tensors by AmpManagerBasedRLEnv.
+            log = infos.get("log")
+            if isinstance(log, dict):
+                for k, v in log.items():
+                    if isinstance(v, torch.Tensor) and (
+                        k.startswith("Episode_Termination/") or k.startswith("Episode_Reward/")
+                    ):
+                        self.track_data(k, float(v.detach().item()))
 
         super().record_transition(
             states, actions, rewards, next_states, terminated, truncated, infos, timestep, timesteps

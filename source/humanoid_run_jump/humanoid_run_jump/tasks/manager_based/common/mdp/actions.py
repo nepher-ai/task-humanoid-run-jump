@@ -49,7 +49,6 @@ class TrackerAction(ActionTerm):
         self._joint_targets = torch.zeros(self.num_envs, TRACKER_ACT_DIM, device=self.device)
 
         self._tracker = FrozenTracker(policy_path=cfg.policy_path, device=self.device)
-        self._last_raw = torch.zeros(self.num_envs, TRACKER_ACT_DIM, device=self.device)
         self._joint_map = JointOrderMap(list(self._asset.data.joint_names), device=self.device)
 
         body_names = self._asset.data.body_names
@@ -80,7 +79,7 @@ class TrackerAction(ActionTerm):
         root_quat = self._asset.data.body_quat_w[:, self._root_idx]
         root_ang_vel = self._asset.data.root_ang_vel_w
 
-        joint_targets_g1, raw = self._tracker.infer_joint_targets(
+        joint_targets_g1, _raw = self._tracker.infer_joint_targets(
             dof_pos=dof_pos,
             dof_vel=dof_vel,
             anchor_quat_wxyz=anchor_quat,
@@ -93,8 +92,6 @@ class TrackerAction(ActionTerm):
         # ProtoMotions BM stores post-PD joint targets as "processed_actions" (G1 order).
         self._processed_actions[:] = joint_targets_g1
         self._prev_processed[:] = joint_targets_g1
-        # Keep raw available for debugging.
-        self._last_raw = raw
 
     def apply_actions(self):
         self._asset.set_joint_position_target(self._joint_targets)

@@ -14,6 +14,8 @@ network is exported as TorchScript next to the checkpoint
 Usage::
 
     isaaclab.bat -p scripts/skrl/play.py --task Nepher-G1-Run-Play-v0
+    isaaclab.bat -p scripts/skrl/play.py --task Nepher-G1-Jump-Play-v0 \\
+        --h 0.50 --flight 1.00
     isaaclab.bat -p scripts/skrl/play.py --task Nepher-G1-Run-Play-v0 \\
         --checkpoint logs/skrl/g1_run_amp/<run>/checkpoints/best_agent.pt
 """
@@ -28,7 +30,7 @@ from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser(description="Play a skrl AMP checkpoint.")
 parser.add_argument("--video", action="store_true", default=False)
-parser.add_argument("--video_length", type=int, default=200)
+parser.add_argument("--video_length", type=int, default=1000)
 parser.add_argument("--num_envs", type=int, default=None)
 parser.add_argument("--task", type=str, default="Nepher-G1-Run-Play-v0")
 parser.add_argument("--agent", type=str, default=None)
@@ -51,6 +53,20 @@ parser.add_argument(
     action=argparse.BooleanOptionalAction,
     default=True,
     help="Export TorchScript AMP policy next to the checkpoint (default: True).",
+)
+parser.add_argument(
+    "--h",
+    type=float,
+    default=None,
+    dest="h_obstacle",
+    help="Jump play: fixed obstacle height h_obstacle (m). Overrides JUMP_PLAY_CMD.",
+)
+parser.add_argument(
+    "--flight",
+    type=float,
+    default=None,
+    dest="flight_distance",
+    help="Jump play: fixed flight_distance (m). Overrides JUMP_PLAY_CMD.",
 )
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
@@ -116,6 +132,24 @@ else:
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: dict):
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+
+    # Optional fixed jump command for play (Nepher-G1-Jump-Play-v0).
+    jump_cmd = getattr(getattr(env_cfg, "commands", None), "jump", None)
+    if jump_cmd is not None and (
+        args_cli.h_obstacle is not None or args_cli.flight_distance is not None
+    ):
+        if args_cli.h_obstacle is not None:
+            h = float(args_cli.h_obstacle)
+            jump_cmd.ranges.h_obstacle = (h, h)
+        if args_cli.flight_distance is not None:
+            d = float(args_cli.flight_distance)
+            jump_cmd.ranges.flight_distance = (d, d)
+        print(
+            "[INFO] Jump play command: "
+            f"h_obstacle={jump_cmd.ranges.h_obstacle[0]:.3f} m, "
+            f"flight_distance={jump_cmd.ranges.flight_distance[0]:.3f} m"
+        )
+
     agent_cfg["trainer"]["close_environment_at_exit"] = False
     agent_cfg["agent"]["experiment"]["write_interval"] = 0
     agent_cfg["agent"]["experiment"]["checkpoint_interval"] = 0

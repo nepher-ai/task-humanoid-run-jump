@@ -60,6 +60,7 @@ def build(subset: str, input_fps: float = 120.0) -> Path:
             output_dir=npz_dir,
             input_fps=input_fps,
             mjcf_path=G1_MJCF_PATH,
+            use_mujoco=True,
         )
         out = PACKAGED_DIR / f"{subset}_motions.pt"
         package_motions(npz_dir, out)
