@@ -13,7 +13,7 @@ import torch
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import ContactSensor
 
-from humanoid_run_jump.tasks.manager_based.common.mdp.jump_envelope import (
+from humanoid_run_jump.tasks.manager_based.jump.mdp.jump_envelope import (
     RISE_HARD_EXTRA,
     foot_sep_hard,
 )
@@ -37,7 +37,7 @@ def update_jump_state(
 ) -> torch.Tensor:
     """Refresh phase machine / latches before rewards. Never terminates.
 
-    Declared first in ``TerminationsCfg`` so :meth:`AmpManagerBasedRLEnv._update_jump_metrics_and_style`
+    Declared first in ``TerminationsCfg`` so :meth:`JumpAmpEnv._update_jump_metrics_and_style`
     runs after ``episode_length_buf`` is incremented but before reward / other
     termination terms read the latches.
     """

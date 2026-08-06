@@ -17,11 +17,11 @@ import torch
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import ContactSensor
 from humanoid_run_jump.tracker.reduced_coords import quat_apply_inverse
-from humanoid_run_jump.tasks.manager_based.common.mdp.gait import (
+from humanoid_run_jump.tasks.manager_based.jump.mdp.gait import (
     foot_contact_mask,
     resolve_ankle_body_ids,
 )
-from humanoid_run_jump.tasks.manager_based.common.mdp.jump_envelope import (
+from humanoid_run_jump.tasks.manager_based.jump.mdp.jump_envelope import (
     FOOT_SEP_MAX_FLIGHT,
     TUCK_EXTENDED,
     foot_sep_flight_max,

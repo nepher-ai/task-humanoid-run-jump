@@ -17,11 +17,11 @@ from isaaclab.envs import ManagerBasedRLEnv, ManagerBasedRLEnvCfg
 
 from humanoid_run_jump.motions.motion_lib import MotionLib
 from humanoid_run_jump.robots.joint_order import JointOrderMap
-from humanoid_run_jump.tasks.manager_based.common.mdp.gait import (
+from humanoid_run_jump.tasks.manager_based.jump.mdp.gait import (
     lead_foot_forward_mask,
     resolve_ankle_body_ids,
 )
-from humanoid_run_jump.tasks.manager_based.common.mdp.jump_envelope import (
+from humanoid_run_jump.tasks.manager_based.jump.mdp.jump_envelope import (
     APEX_ASYM_MIN,
     CLEARANCE_HARD_EXTRA,
     FOOT_SEP_HARD,
@@ -31,10 +31,10 @@ from humanoid_run_jump.tasks.manager_based.common.mdp.jump_envelope import (
     RISE_HARD_EXTRA,
     foot_sep_flight_max,
 )
-from humanoid_run_jump.tasks.manager_based.common.mdp.observations import amp_obs_single
+from humanoid_run_jump.tasks.manager_based.jump.mdp.observations import amp_obs_single
 from humanoid_run_jump.tracker.reduced_coords import quat_apply_inverse, quat_to_tan_norm
 
-# Jump phase state machine (latched in AmpManagerBasedRLEnv._ep_phase).
+# Jump phase state machine (latched in JumpAmpEnv._ep_phase).
 PHASE_PREP = 0
 PHASE_PLANT = 1
 PHASE_PUSH = 2
@@ -78,7 +78,7 @@ def compute_amp_obs_from_motion(
     return torch.cat(parts, dim=-1)
 
 
-class AmpManagerBasedRLEnv(ManagerBasedRLEnv):
+class JumpAmpEnv(ManagerBasedRLEnv):
     """ManagerBasedRLEnv extended with AMP extras for skrl.
 
     Required by skrl AMP runner:
@@ -117,13 +117,13 @@ class AmpManagerBasedRLEnv(ManagerBasedRLEnv):
             path = Path(motion_file)
             if not path.is_absolute():
                 # Resolve relative to project root (task-humanoid-run-jump/).
-                # .../tasks/manager_based/common/amp_env.py → task-humanoid-run-jump/
+                # .../tasks/manager_based/jump/jump_amp_env.py → task-humanoid-run-jump/
                 project_root = Path(__file__).resolve().parents[6]
                 cand = project_root / path
                 path = cand if cand.exists() else Path.cwd() / motion_file
             if not path.exists():
                 raise FileNotFoundError(
-                    f"[AmpManagerBasedRLEnv] motion_file not found: {path}\n"
+                    f"[JumpAmpEnv] motion_file not found: {path}\n"
                     "Build it with: python scripts/build_amp_dataset.py"
                 )
             self._motion_lib = MotionLib(path, device=self.device)
@@ -1038,7 +1038,7 @@ class AmpManagerBasedRLEnv(ManagerBasedRLEnv):
         """
         if self._motion_lib is None:
             raise RuntimeError(
-                "[AmpManagerBasedRLEnv] collect_reference_motions called with no "
+                "[JumpAmpEnv] collect_reference_motions called with no "
                 "motion library — set cfg.motion_file and rebuild the dataset."
             )
 

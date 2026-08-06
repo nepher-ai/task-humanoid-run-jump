@@ -28,8 +28,8 @@ from isaaclab_tasks.manager_based.locomotion.velocity.mdp import (
 )
 
 from humanoid_run_jump.robots.g1 import G1_CFG
-from humanoid_run_jump.tasks.manager_based.common import mdp
-from humanoid_run_jump.tasks.manager_based.common.mdp.actions import TrackerActionCfg
+from humanoid_run_jump.tasks.manager_based.run import mdp
+from humanoid_run_jump.tasks.manager_based.run.mdp.actions import TrackerActionCfg
 
 ##
 # Scene
@@ -159,7 +159,7 @@ class G1RunEnvCfg(ManagerBasedRLEnvCfg):
     events: EventCfg = EventCfg()
     curriculum: CurriculumCfg = CurriculumCfg()
 
-    # AMP extras consumed by AmpManagerBasedRLEnv
+    # AMP extras consumed by RunAmpEnv
     motion_file: str = "motions/packaged/run_motions.pt"
     num_amp_observations: int = 2
 

@@ -17,7 +17,7 @@ from isaaclab.markers.config import BLUE_ARROW_X_MARKER_CFG, GREEN_ARROW_X_MARKE
 from isaaclab.utils import configclass
 from isaaclab.utils.math import quat_apply, quat_from_euler_xyz, yaw_quat
 
-from humanoid_run_jump.tasks.manager_based.common.mdp.jump_envelope import (
+from humanoid_run_jump.tasks.manager_based.jump.mdp.jump_envelope import (
     FLIGHT_DIST_MAX,
     FLIGHT_DIST_MIN,
     H_MAX,
@@ -120,18 +120,25 @@ class JumpCommand(CommandTerm):
         right = right / right.norm(dim=-1, keepdim=True).clamp(min=1e-6)
         return forward, right
 
-    def _resample_command(self, env_ids: Sequence[int]):
+    def set_command(
+        self,
+        env_ids: Sequence[int] | torch.Tensor,
+        h: torch.Tensor,
+        flight: torch.Tensor,
+    ) -> None:
+        """HL-driven equivalent of :meth:`_resample_command` with supplied ``(h, flight)``.
+
+        Re-derives envelope stars and re-freezes the progress / heading frame
+        from the current root pose so the jump actor sees a fresh hand-off.
+        """
+        if not isinstance(env_ids, torch.Tensor):
+            env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
         n = len(env_ids)
         if n == 0:
             return
-        r = self.cfg.ranges
 
-        h = clamp_obstacle_height(torch.empty(n, device=self.device).uniform_(*r.h_obstacle))
-        # Height-coupled clamp: high obstacles cannot request longer flights
-        # than the matching CSV bin demonstrates (see jump_envelope.flight_cap).
-        flight = clamp_flight_distance(
-            torch.empty(n, device=self.device).uniform_(*r.flight_distance), h
-        )
+        h = clamp_obstacle_height(h)
+        flight = clamp_flight_distance(flight, h)
         vx_star, _, vz_star, _ = map_takeoff_targets(h)
         rise_star = apex_rise_target(h)
         tuck_star = tuck_apex_target(h)
@@ -160,6 +167,20 @@ class JumpCommand(CommandTerm):
         self.pitch_apex_star[env_ids] = pitch_ap_star
         self.progress[env_ids] = 0.0
         self.heading_error[env_ids] = 0.0
+
+    def _resample_command(self, env_ids: Sequence[int]):
+        n = len(env_ids)
+        if n == 0:
+            return
+        r = self.cfg.ranges
+
+        h = clamp_obstacle_height(torch.empty(n, device=self.device).uniform_(*r.h_obstacle))
+        # Height-coupled clamp: high obstacles cannot request longer flights
+        # than the matching CSV bin demonstrates (see jump_envelope.flight_cap).
+        flight = clamp_flight_distance(
+            torch.empty(n, device=self.device).uniform_(*r.flight_distance), h
+        )
+        self.set_command(env_ids, h, flight)
 
     def _update_command(self):
         root = self.robot.data.root_pos_w

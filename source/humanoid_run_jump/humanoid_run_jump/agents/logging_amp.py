@@ -86,7 +86,7 @@ class LoggingAMP(AMP):
                 if key in infos:
                     self.track_data(f"Jump / {key}", float(infos[key]))
 
-            # Termination / reward episode extras promoted to tensors by AmpManagerBasedRLEnv.
+            # Termination / reward episode extras promoted to tensors by task AMP envs.
             log = infos.get("log")
             if isinstance(log, dict):
                 for k, v in log.items():

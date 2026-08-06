@@ -25,10 +25,10 @@ from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 from isaaclab_tasks.manager_based.locomotion.velocity.mdp import time_out
 
 from humanoid_run_jump.robots.g1 import G1_CFG
-from humanoid_run_jump.tasks.manager_based.common import mdp
-from humanoid_run_jump.tasks.manager_based.common.mdp.actions import TrackerActionCfg
-from humanoid_run_jump.tasks.manager_based.common.mdp.commands import JumpCommandCfg
-from humanoid_run_jump.tasks.manager_based.common.mdp.jump_envelope import (
+from humanoid_run_jump.tasks.manager_based.jump import mdp
+from humanoid_run_jump.tasks.manager_based.jump.mdp.actions import TrackerActionCfg
+from humanoid_run_jump.tasks.manager_based.jump.mdp.commands import JumpCommandCfg
+from humanoid_run_jump.tasks.manager_based.jump.mdp.jump_envelope import (
     FLIGHT_DIST_MAX,
     FLIGHT_DIST_MIN,
     H_MAX,
@@ -341,7 +341,7 @@ class G1JumpEnvCfg(ManagerBasedRLEnvCfg):
 
     motion_file: str = "motions/packaged/jump_motions.pt"
     num_amp_observations: int = 2
-    # Jump success metric knobs consumed by AmpManagerBasedRLEnv.
+    # Jump success metric knobs consumed by JumpAmpEnv.
     ankle_to_sole: float = 0.05
     stand_height: float = 0.75
     # 3 s post-landing window for idle dense/sparse.

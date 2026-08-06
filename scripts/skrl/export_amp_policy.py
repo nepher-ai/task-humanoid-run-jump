@@ -51,11 +51,24 @@ class _SkrlAmpPolicyJIT(nn.Module):
         return x
 
 
+def _resolve_action_head(policy: nn.Module) -> nn.Module | None:
+    """Return the mean-action Linear head for separate or shared skrl models.
+
+    - ``separate: True`` (AMP): ``output_layer``
+    - ``separate: False`` (HL PPO shared): ``policy_layer``
+    """
+    for name in ("output_layer", "policy_layer"):
+        layer = getattr(policy, name, None)
+        if layer is not None:
+            return copy.deepcopy(layer).cpu().eval()
+    return None
+
+
 def export_skrl_amp_policy_as_jit(agent, export_dir: str | Path, filename: str = "policy.pt") -> Path:
-    """Trace the skrl AMP policy mean network to ``export_dir/filename``.
+    """Trace the skrl policy mean network to ``export_dir/filename``.
 
     Input: raw policy observation ``[B, obs_dim]`` (same as env ``policy`` group).
-    Output: deterministic mean action ``[B, act_dim]`` (64-D target frame for this task).
+    Output: deterministic mean action ``[B, act_dim]``.
     """
     export_dir = Path(export_dir)
     export_dir.mkdir(parents=True, exist_ok=True)
@@ -63,13 +76,15 @@ def export_skrl_amp_policy_as_jit(agent, export_dir: str | Path, filename: str =
     policy = agent.policy
     if not hasattr(policy, "net_container"):
         raise AttributeError(
-            "skrl policy has no 'net_container'; expected GaussianMixin model from Runner."
+            "skrl policy has no 'net_container'; expected GaussianMixin / SharedModel from Runner."
         )
 
     net = copy.deepcopy(policy.net_container).cpu().eval()
-    output_layer = None
-    if hasattr(policy, "output_layer") and policy.output_layer is not None:
-        output_layer = copy.deepcopy(policy.output_layer).cpu().eval()
+    output_layer = _resolve_action_head(policy)
+    if output_layer is None:
+        raise AttributeError(
+            "skrl policy has neither 'output_layer' nor 'policy_layer'; cannot export mean actions."
+        )
 
     obs_mean = obs_var = None
     epsilon, clip_threshold = 1e-8, 5.0
@@ -113,8 +128,11 @@ def export_skrl_amp_policy_as_jit(agent, export_dir: str | Path, filename: str =
         "epsilon": epsilon,
         "clip_threshold": clip_threshold,
         "input": "policy observation [B, obs_dim]",
-        "output": "mean_actions [B, act_dim] (deterministic AMP actor)",
-        "note": "Does not include the frozen BeyondMimic tracker; feed the 64-D target frame to TrackerAction.",
+        "output": "mean_actions [B, act_dim] (deterministic actor)",
+        "note": (
+            "Mean head only (no value / discriminator). For AMP run/jump, feed the 64-D "
+            "target frame to TrackerAction; for HL PPO, feed the 6-D action to HierarchicalSwitchAction."
+        ),
     }
     meta_path = export_dir / "policy_meta.json"
     with open(meta_path, "w", encoding="utf-8") as f:

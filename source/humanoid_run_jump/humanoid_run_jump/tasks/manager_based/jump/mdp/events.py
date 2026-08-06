@@ -195,6 +195,12 @@ def reset_from_runin_bank(
     bank_path: str = "motions/packaged/runin_states.pt",
     bank_prob: float = 1.0,
     pose_range: dict[str, tuple[float, float]] | None = None,
+    min_root_z: float = 0.55,
+    max_tilt_rad: float = 0.45,
+    max_lat_vel: float = 0.45,
+    min_fwd_vel: float = 1.2,
+    max_fwd_vel: float = 3.0,
+    max_filter_tries: int = 24,
 ):
     """Overwrite resets with precomputed frozen-run-actor hand-off states.
 
@@ -203,8 +209,12 @@ def reset_from_runin_bank(
     ``G1_JOINT_NAMES`` order. Intended to run *after* :func:`reset_root_and_joints`
     so the complementary ``1 - bank_prob`` fraction keeps standing resets.
 
+    Filters bank samples for upright height/tilt, limited lateral velocity, and
+    forward-speed compatibility with the HL cruise band so episodes are less
+    likely to die before the first obstacle.
+
     Canonicalizes heading to world +x (plus ``pose_range`` yaw noise). After
-    reset, :class:`~humanoid_run_jump.tasks.manager_based.common.mdp.commands.JumpCommand`
+    reset, :class:`~humanoid_run_jump.tasks.manager_based.jump.mdp.commands.JumpCommand`
     freezes flight progress along the robot's front at resample — jump direction
     is the reset heading, not a fixed world axis independent of facing.
     """
@@ -217,7 +227,7 @@ def reset_from_runin_bank(
 
         path = Path(bank_path)
         if not path.is_absolute():
-            # events.py → .../common/mdp → task-humanoid-run-jump/ is parents[7]
+            # events.py → .../jump/mdp → task-humanoid-run-jump/ is parents[7]
             project_root = Path(__file__).resolve().parents[7]
             cand = project_root / path
             path = cand if cand.exists() else Path.cwd() / bank_path
@@ -231,8 +241,33 @@ def reset_from_runin_bank(
             "dof_pos": payload["dof_pos"].to(env.device),
             "dof_vel": payload["dof_vel"].to(env.device),
         }
+        # Precompute a stable subset once so resets stay cheap.
+        root_pose_all = bank["root_pose"]
+        root_vel_all = bank["root_vel"]
+        z_ok = root_pose_all[:, 2] >= float(min_root_z)
+        # Approx tilt from quaternion: projected gravity z ≈ 1 − 2(qx²+qy²)
+        qx = root_pose_all[:, 4]
+        qy = root_pose_all[:, 5]
+        cos_tilt = (1.0 - 2.0 * (qx * qx + qy * qy)).clamp(-1.0, 1.0)
+        tilt_ok = torch.acos(cos_tilt) <= float(max_tilt_rad)
+        lat_ok = root_vel_all[:, 1].abs() <= float(max_lat_vel)
+        fwd_ok = (root_vel_all[:, 0] >= float(min_fwd_vel)) & (
+            root_vel_all[:, 0] <= float(max_fwd_vel)
+        )
+        stable = z_ok & tilt_ok & lat_ok & fwd_ok
+        stable_idx = stable.nonzero(as_tuple=False).flatten()
+        n_all = int(root_pose_all.shape[0])
+        if len(stable_idx) < max(32, n_all // 20):
+            # Fall back to height+tilt only if the full filter is too strict.
+            stable_idx = (z_ok & tilt_ok).nonzero(as_tuple=False).flatten()
+        if len(stable_idx) == 0:
+            stable_idx = torch.arange(n_all, device=env.device)
+        bank["stable_idx"] = stable_idx
         env._runin_bank = bank
-        print(f"[reset_from_runin_bank] loaded {bank['root_pose'].shape[0]} states from {path}")
+        print(
+            f"[reset_from_runin_bank] loaded {bank['root_pose'].shape[0]} states "
+            f"({len(stable_idx)} stable) from {path}"
+        )
 
     n_bank = int(bank["root_pose"].shape[0])
     if n_bank == 0:
@@ -251,7 +286,33 @@ def reset_from_runin_bank(
         asset = env.scene[asset_cfg.name]
         jmap = JointOrderMap(list(asset.data.joint_names), device=env.device)
 
-    idx = torch.randint(0, n_bank, (n,), device=env.device)
+    stable_idx = bank.get("stable_idx")
+    if stable_idx is None or len(stable_idx) == 0:
+        pick = torch.randint(0, n_bank, (n,), device=env.device)
+    else:
+        # Sample with replacement from the stable pool.
+        choice = torch.randint(0, len(stable_idx), (n,), device=env.device)
+        pick = stable_idx[choice]
+        # Light online re-filter for the chosen batch (reject + redraw a few times).
+        for _ in range(int(max_filter_tries)):
+            rp = bank["root_pose"][pick]
+            rv = bank["root_vel"][pick]
+            qx = rp[:, 4]
+            qy = rp[:, 5]
+            cos_tilt = (1.0 - 2.0 * (qx * qx + qy * qy)).clamp(-1.0, 1.0)
+            bad = (
+                (rp[:, 2] < float(min_root_z))
+                | (torch.acos(cos_tilt) > float(max_tilt_rad))
+                | (rv[:, 1].abs() > float(max_lat_vel))
+                | (rv[:, 0] < float(min_fwd_vel))
+                | (rv[:, 0] > float(max_fwd_vel))
+            )
+            if not bool(bad.any().item()):
+                break
+            redraw = torch.randint(0, len(stable_idx), (int(bad.sum().item()),), device=env.device)
+            pick = pick.clone()
+            pick[bad] = stable_idx[redraw]
+    idx = pick
     root_pose = bank["root_pose"][idx].clone()
     root_vel = bank["root_vel"][idx].clone()
     dof_pos = jmap.to_sim(bank["dof_pos"][idx].clone())

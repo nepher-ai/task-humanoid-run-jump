@@ -11,7 +11,7 @@ from . import agents
 
 gym.register(
     id="Nepher-G1-Run-v0",
-    entry_point="humanoid_run_jump.tasks.manager_based.common.amp_env:AmpManagerBasedRLEnv",
+    entry_point="humanoid_run_jump.tasks.manager_based.run.run_amp_env:RunAmpEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.run_env_cfg:G1RunEnvCfg",
@@ -21,7 +21,7 @@ gym.register(
 
 gym.register(
     id="Nepher-G1-Run-Play-v0",
-    entry_point="humanoid_run_jump.tasks.manager_based.common.amp_env:AmpManagerBasedRLEnv",
+    entry_point="humanoid_run_jump.tasks.manager_based.run.run_amp_env:RunAmpEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.run_env_cfg:G1RunEnvCfg_PLAY",

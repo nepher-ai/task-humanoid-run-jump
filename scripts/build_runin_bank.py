@@ -92,8 +92,8 @@ from isaaclab.sensors import ContactSensorCfg
 
 import humanoid_run_jump  # noqa: F401
 from humanoid_run_jump.agents.frozen_actor import DEFAULT_RUN_POLICY_PATH, FrozenActor
-from humanoid_run_jump.tasks.manager_based.common.mdp.gait import runin_handoff_mask
-from humanoid_run_jump.tasks.manager_based.common.mdp.observations import (
+from humanoid_run_jump.tasks.manager_based.run.mdp.gait import runin_handoff_mask
+from humanoid_run_jump.tasks.manager_based.run.mdp.observations import (
     base_lin_vel,
     last_action,
     reduced_coords_proprio,

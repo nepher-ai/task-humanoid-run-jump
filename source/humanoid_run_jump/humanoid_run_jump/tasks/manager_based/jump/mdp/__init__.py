@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Shared MDP terms for G1 run / jump / course environments."""
+"""Jump MDP terms for G1 jump environment."""
 
 from .actions import JointPdAction, JointPdActionCfg, TrackerAction, TrackerActionCfg
 from .commands import JumpCommand, JumpCommandCfg
