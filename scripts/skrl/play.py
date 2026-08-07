@@ -59,7 +59,8 @@ parser.add_argument(
     type=float,
     default=None,
     dest="h_obstacle",
-    help="Jump play: fixed obstacle height h_obstacle (m). Overrides JUMP_PLAY_CMD.",
+    help="Jump play: fixed obstacle height h_obstacle (m). Overrides JUMP_PLAY_CMD. "
+    "RunJumpHL play: fixed course obstacle height (m).",
 )
 parser.add_argument(
     "--flight",
@@ -67,6 +68,26 @@ parser.add_argument(
     default=None,
     dest="flight_distance",
     help="Jump play: fixed flight_distance (m). Overrides JUMP_PLAY_CMD.",
+)
+parser.add_argument(
+    "--num_obstacles",
+    type=int,
+    default=None,
+    help="RunJumpHL play: number of obstacles on the course (1-3).",
+)
+parser.add_argument(
+    "--obstacle_h",
+    type=float,
+    default=None,
+    help="RunJumpHL play: fixed obstacle height in metres (alias of --h for HL).",
+)
+parser.add_argument(
+    "--show_plant_target",
+    action=argparse.BooleanOptionalAction,
+    default=None,
+    help="RunJumpHL play: draw the right-foot plant band [0.90, 1.20] m, the d* target, "
+    "and the predicted footfalls at current (red) vs required (cyan) speed "
+    "(default: on for Play). Use --no-show_plant_target to disable.",
 )
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
@@ -138,17 +159,42 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if jump_cmd is not None and (
         args_cli.h_obstacle is not None or args_cli.flight_distance is not None
     ):
-        if args_cli.h_obstacle is not None:
-            h = float(args_cli.h_obstacle)
-            jump_cmd.ranges.h_obstacle = (h, h)
-        if args_cli.flight_distance is not None:
-            d = float(args_cli.flight_distance)
-            jump_cmd.ranges.flight_distance = (d, d)
-        print(
-            "[INFO] Jump play command: "
-            f"h_obstacle={jump_cmd.ranges.h_obstacle[0]:.3f} m, "
-            f"flight_distance={jump_cmd.ranges.flight_distance[0]:.3f} m"
-        )
+        # Only pin JumpCommand ranges for the pure Jump task; RunJumpHL sets
+        # jump cmds from the HL action / obstacle, not from this range.
+        if "RunJumpHL" not in args_cli.task:
+            if args_cli.h_obstacle is not None:
+                h = float(args_cli.h_obstacle)
+                jump_cmd.ranges.h_obstacle = (h, h)
+            if args_cli.flight_distance is not None:
+                d = float(args_cli.flight_distance)
+                jump_cmd.ranges.flight_distance = (d, d)
+            print(
+                "[INFO] Jump play command: "
+                f"h_obstacle={jump_cmd.ranges.h_obstacle[0]:.3f} m, "
+                f"flight_distance={jump_cmd.ranges.flight_distance[0]:.3f} m"
+            )
+
+    # RunJumpHL play: pin course obstacle count / height via event params.
+    if "RunJumpHL" in args_cli.task:
+        if args_cli.show_plant_target is not None:
+            env_cfg.show_plant_target = bool(args_cli.show_plant_target)
+        course_event = getattr(getattr(env_cfg, "events", None), "randomize_course", None)
+        if course_event is not None:
+            hl_h = args_cli.obstacle_h if args_cli.obstacle_h is not None else args_cli.h_obstacle
+            if args_cli.num_obstacles is not None:
+                n = int(args_cli.num_obstacles)
+                if n < 1 or n > 3:
+                    raise SystemExit(f"--num_obstacles must be in [1, 3], got {n}")
+                course_event.params["max_obstacles"] = n
+            if hl_h is not None:
+                h = float(hl_h)
+                course_event.params["height_range"] = (h, h)
+            print(
+                "[INFO] RunJumpHL course: "
+                f"max_obstacles={course_event.params.get('max_obstacles')}, "
+                f"height_range={course_event.params.get('height_range')}, "
+                f"show_plant_target={getattr(env_cfg, 'show_plant_target', False)}"
+            )
 
     agent_cfg["trainer"]["close_environment_at_exit"] = False
     agent_cfg["agent"]["experiment"]["write_interval"] = 0

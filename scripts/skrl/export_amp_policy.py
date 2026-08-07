@@ -54,8 +54,10 @@ class _SkrlAmpPolicyJIT(nn.Module):
 def _resolve_action_head(policy: nn.Module) -> nn.Module | None:
     """Return the mean-action Linear head for separate or shared skrl models.
 
-    - ``separate: True`` (AMP): ``output_layer``
-    - ``separate: False`` (HL PPO shared): ``policy_layer``
+    - Separate Gaussian with non-embedded head: ``output_layer``
+    - Shared PPO model: ``policy_layer``
+    - Separate Gaussian with ``embed_output=True`` (skrl default): ``None`` —
+      the action Linear is already the last module of ``net_container``.
     """
     for name in ("output_layer", "policy_layer"):
         layer = getattr(policy, name, None)
@@ -80,11 +82,8 @@ def export_skrl_amp_policy_as_jit(agent, export_dir: str | Path, filename: str =
         )
 
     net = copy.deepcopy(policy.net_container).cpu().eval()
+    # May be None when skrl embeds ACTIONS into net_container (AMP default).
     output_layer = _resolve_action_head(policy)
-    if output_layer is None:
-        raise AttributeError(
-            "skrl policy has neither 'output_layer' nor 'policy_layer'; cannot export mean actions."
-        )
 
     obs_mean = obs_var = None
     epsilon, clip_threshold = 1e-8, 5.0

@@ -37,6 +37,14 @@ parser.add_argument(
 parser.add_argument(
     "--algorithm", type=str, default="AMP", choices=["AMP", "PPO", "IPPO", "MAPPO"]
 )
+parser.add_argument(
+    "--show_plant_target",
+    action=argparse.BooleanOptionalAction,
+    default=None,
+    help="RunJumpHL: draw plant band / d* / current-vs-required footfalls. "
+    "Default: on when not --headless, off under --headless. "
+    "Use --no-show_plant_target to force off.",
+)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 if args_cli.video:
@@ -148,6 +156,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if isinstance(env_cfg, ManagerBasedRLEnvCfg):
         env_cfg.export_io_descriptors = args_cli.export_io_descriptors
     env_cfg.log_dir = log_dir
+
+    # RunJumpHL: plant / footfall markers only make sense with a viewport.
+    if "RunJumpHL" in args_cli.task and hasattr(env_cfg, "show_plant_target"):
+        if args_cli.show_plant_target is not None:
+            env_cfg.show_plant_target = bool(args_cli.show_plant_target)
+        else:
+            env_cfg.show_plant_target = not bool(getattr(args_cli, "headless", False))
+        print(f"[INFO] RunJumpHL show_plant_target={env_cfg.show_plant_target}")
 
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
     if isinstance(env.unwrapped, DirectMARLEnv) and algorithm in ["ppo"]:

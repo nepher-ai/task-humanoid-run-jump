@@ -1,0 +1,70 @@
+seed: 42
+
+models:
+  separate: False
+  policy:
+    class: GaussianMixin
+    clip_actions: False
+    clip_log_std: True
+    min_log_std: -20.0
+    max_log_std: 2.0
+    initial_log_std: -1.0
+    fixed_log_std: False
+    network:
+      - name: net
+        input: OBSERVATIONS
+        layers: [512, 256, 128]
+        activations: relu
+    output: ACTIONS
+  value:
+    class: DeterministicMixin
+    clip_actions: False
+    network:
+      - name: net
+        input: OBSERVATIONS
+        layers: [512, 256, 128]
+        activations: relu
+    output: ONE
+
+memory:
+  class: RandomMemory
+  memory_size: -1
+
+agent:
+  class: PPO
+  # 48 steps = 0.96 s of rollout, long enough for the value function to carry
+  # credit across a hand-off instead of bootstrapping through it.
+  rollouts: 48
+  learning_epochs: 5
+  mini_batches: 4
+  # 0.99 at dt=0.02 gives a 2 s horizon on a 10 s course, which made the finish
+  # bonus worth 0.0066 of its face value at episode start. 0.995 -> 4 s.
+  discount_factor: 0.995
+  lambda: 0.97
+  learning_rate: 3.0e-4
+  learning_rate_scheduler: null
+  learning_rate_scheduler_kwargs: null
+  state_preprocessor: RunningStandardScaler
+  state_preprocessor_kwargs: null
+  value_preprocessor: RunningStandardScaler
+  value_preprocessor_kwargs: null
+  random_timesteps: 0
+  learning_starts: 0
+  grad_norm_clip: 1.0
+  ratio_clip: 0.2
+  value_clip: 0.2
+  clip_predicted_values: True
+  entropy_loss_scale: 0.01
+  value_loss_scale: 2.0
+  kl_threshold: 0.0
+  time_limit_bootstrap: True
+  experiment:
+    directory: "g1_runjump_hl_ppo"
+    experiment_name: ""
+    write_interval: 1000
+    checkpoint_interval: 5000
+
+trainer:
+  class: SequentialTrainer
+  timesteps: 500000
+  environment_info: log
