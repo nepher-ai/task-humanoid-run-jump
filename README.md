@@ -20,6 +20,10 @@ policy for straight obstacle courses.
 
 Requires [Isaac Lab](https://isaac-sim.github.io/IsaacLab) and `skrl>=1.4.3`.
 
+The BeyondMimic **tracker** (`frozen_policies/policy.pt`) must be trained with the
+[humanoid-g1-tracking](https://github.com/nepher-ai/humanoid-g1-tracking) project,
+then installed here via `scripts/export_frozen_policy.py`.
+
 ```bash
 # From task-humanoid-run-jump/
 isaaclab.bat -p -m pip install -e source/humanoid_run_jump
@@ -32,7 +36,7 @@ isaaclab.bat -p scripts/build_runin_bank.py --headless --num_envs 64 --num_sampl
 
 | Asset | Purpose |
 |---|---|
-| `frozen_policies/policy.pt` | BeyondMimic tracker |
+| `frozen_policies/policy.pt` | BeyondMimic tracker (from [humanoid-g1-tracking](https://github.com/nepher-ai/humanoid-g1-tracking)) |
 | `best_policy/run/policy.pt` | Frozen run actor |
 | `best_policy/jump/policy.pt` | Frozen jump actor |
 | `best_policy/best.pt` (or `best_policy.pt`) | HL policy (eval) |
