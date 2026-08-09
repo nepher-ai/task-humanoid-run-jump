@@ -19,12 +19,12 @@ from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors import ContactSensorCfg
-from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 from isaaclab_tasks.manager_based.locomotion.velocity.mdp import time_out
 
 from humanoid_run_jump.robots.g1 import G1_CFG
+from humanoid_run_jump.tasks.manager_based.finite_ground import FiniteGroundTerrainImporterCfg
 from humanoid_run_jump.tasks.manager_based.jump import mdp
 from humanoid_run_jump.tasks.manager_based.jump.mdp.actions import TrackerActionCfg
 from humanoid_run_jump.tasks.manager_based.jump.mdp.commands import JumpCommandCfg
@@ -60,7 +60,9 @@ JUMP_PLAY_CMD_HARD = JumpCommandCfg.Ranges(
 
 @configclass
 class JumpSceneCfg(InteractiveSceneCfg):
-    terrain = TerrainImporterCfg(
+    # Finite ground (not Isaac Lab's default 2e6 m plane) — avoids depth-buffer
+    # shimmer / white-plane flicker in play / --video overview shots.
+    terrain = FiniteGroundTerrainImporterCfg(
         prim_path="/World/ground",
         terrain_type="plane",
         collision_group=-1,

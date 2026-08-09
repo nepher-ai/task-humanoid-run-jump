@@ -163,7 +163,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             env_cfg.show_plant_target = bool(args_cli.show_plant_target)
         else:
             env_cfg.show_plant_target = not bool(getattr(args_cli, "headless", False))
-        print(f"[INFO] RunJumpHL show_plant_target={env_cfg.show_plant_target}")
+        if hasattr(env_cfg, "show_course_lines"):
+            env_cfg.show_course_lines = env_cfg.show_plant_target
+        print(
+            f"[INFO] RunJumpHL show_plant_target={env_cfg.show_plant_target}, "
+            f"show_course_lines={getattr(env_cfg, 'show_course_lines', False)}"
+        )
 
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
     if isinstance(env.unwrapped, DirectMARLEnv) and algorithm in ["ppo"]:

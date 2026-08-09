@@ -16,6 +16,8 @@ Usage::
     isaaclab.bat -p scripts/skrl/play.py --task Nepher-G1-Run-Play-v0
     isaaclab.bat -p scripts/skrl/play.py --task Nepher-G1-Jump-Play-v0 \\
         --h 0.50 --flight 1.00
+    isaaclab.bat -p scripts/skrl/play.py --task Nepher-G1-Jump-Play-v0 \\
+        --num_envs 16 --video
     isaaclab.bat -p scripts/skrl/play.py --task Nepher-G1-Run-Play-v0 \\
         --checkpoint logs/skrl/g1_run_amp/<run>/checkpoints/best_agent.pt
 """
@@ -30,7 +32,31 @@ from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser(description="Play a skrl AMP checkpoint.")
 parser.add_argument("--video", action="store_true", default=False)
-parser.add_argument("--video_length", type=int, default=1000)
+parser.add_argument(
+    "--video_length",
+    type=int,
+    default=None,
+    help="Video length in env steps. Default: sized for the camera choreography "
+    "(3s overview + 3×12s robot tracks).",
+)
+parser.add_argument(
+    "--video_overview_s",
+    type=float,
+    default=3.0,
+    help="With --video: seconds of high wide shot covering all envs before tracking.",
+)
+parser.add_argument(
+    "--video_track_s",
+    type=float,
+    default=12.0,
+    help="With --video: seconds to track each individual robot.",
+)
+parser.add_argument(
+    "--video_num_robots",
+    type=int,
+    default=3,
+    help="With --video: number of robots to film after the overview.",
+)
 parser.add_argument("--num_envs", type=int, default=None)
 parser.add_argument("--task", type=str, default="Nepher-G1-Run-Play-v0")
 parser.add_argument("--agent", type=str, default=None)
@@ -85,9 +111,9 @@ parser.add_argument(
     "--show_plant_target",
     action=argparse.BooleanOptionalAction,
     default=None,
-    help="RunJumpHL play: draw the right-foot plant band [0.90, 1.20] m, the d* target, "
-    "and the predicted footfalls at current (red) vs required (cyan) speed "
-    "(default: on for Play). Use --no-show_plant_target to disable.",
+    help="RunJumpHL play: draw plant band / d* / footfalls. "
+    "Default: on for Play, off with --video. Start/end lines stay on either way. "
+    "Use --no-show_plant_target to force plant markers off.",
 )
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
@@ -126,18 +152,22 @@ from isaaclab.envs import (
     multi_agent_to_single_agent,
 )
 from isaaclab.utils.assets import retrieve_file_path
-from isaaclab.utils.dict import print_dict
 from isaaclab_rl.skrl import SkrlVecEnvWrapper
 from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import humanoid_run_jump  # noqa: F401
 
-# Allow ``from export_amp_policy import ...`` when launched from project root.
+# Allow ``from play_video import ...`` when launched from project root.
 _SCRIPTS_SKRL = Path(__file__).resolve().parent
 if str(_SCRIPTS_SKRL) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_SKRL))
 from export_amp_policy import export_skrl_amp_policy_as_jit  # noqa: E402
+from play_video import (  # noqa: E402
+    RealTimeVideoRecorder,
+    StableRgbRenderWrapper,
+    VideoCameraDirector,
+)
 
 if args_cli.agent is None:
     algorithm = args_cli.algorithm.lower()
@@ -174,10 +204,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 f"flight_distance={jump_cmd.ranges.flight_distance[0]:.3f} m"
             )
 
+    # Quieter visuals for documentary video.
+    if args_cli.video and jump_cmd is not None and hasattr(jump_cmd, "debug_vis"):
+        jump_cmd.debug_vis = False
+
     # RunJumpHL play: pin course obstacle count / height via event params.
     if "RunJumpHL" in args_cli.task:
+        # Plant markers clutter recorded video; start/end lines stay on.
         if args_cli.show_plant_target is not None:
             env_cfg.show_plant_target = bool(args_cli.show_plant_target)
+        elif args_cli.video:
+            env_cfg.show_plant_target = False
+        if hasattr(env_cfg, "show_course_lines"):
+            env_cfg.show_course_lines = True
         course_event = getattr(getattr(env_cfg, "events", None), "randomize_course", None)
         if course_event is not None:
             hl_h = args_cli.obstacle_h if args_cli.obstacle_h is not None else args_cli.h_obstacle
@@ -193,7 +232,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 "[INFO] RunJumpHL course: "
                 f"max_obstacles={course_event.params.get('max_obstacles')}, "
                 f"height_range={course_event.params.get('height_range')}, "
-                f"show_plant_target={getattr(env_cfg, 'show_plant_target', False)}"
+                f"show_plant_target={getattr(env_cfg, 'show_plant_target', False)}, "
+                f"show_course_lines={getattr(env_cfg, 'show_course_lines', False)}"
             )
 
     agent_cfg["trainer"]["close_environment_at_exit"] = False
@@ -222,6 +262,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     log_dir = os.path.dirname(os.path.dirname(resume_path))
     env_cfg.log_dir = log_dir
 
+    # Documentary video: world-space overview camera before env creation.
+    if args_cli.video:
+        env_cfg.viewer.origin_type = "world"
+        env_cfg.viewer.eye = (12.0, 12.0, 10.0)
+        env_cfg.viewer.lookat = (0.0, 0.0, 0.0)
+
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
     if isinstance(env.unwrapped, DirectMARLEnv) and algorithm in ["ppo"]:
         env = multi_agent_to_single_agent(env)
@@ -231,16 +277,48 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     except AttributeError:
         dt = env.unwrapped.step_dt
 
+    cam_director = None
+    video_recorder = None
+    video_length = args_cli.video_length
     if args_cli.video:
-        video_kwargs = {
-            "video_folder": os.path.join(log_dir, "videos", "play"),
-            "step_trigger": lambda step: step == 0,
-            "video_length": args_cli.video_length,
-            "disable_logger": True,
-        }
-        print("[INFO] Recording video.")
-        print_dict(video_kwargs, nesting=4)
-        env = gym.wrappers.RecordVideo(env, **video_kwargs)
+        base_env = env.unwrapped
+        # Dense renders keep the viewport RGB annotator warm across camera cuts.
+        base_env.cfg.sim.render_interval = 1
+
+        if base_env.num_envs < int(args_cli.video_num_robots):
+            print(
+                f"[WARN] --video with num_envs={base_env.num_envs}: "
+                f"only {base_env.num_envs} robot(s) can be filmed "
+                f"(requested {args_cli.video_num_robots}). Prefer --num_envs 16."
+            )
+
+        cam_director = VideoCameraDirector.for_task(
+            base_env,
+            args_cli.task,
+            overview_s=float(args_cli.video_overview_s),
+            track_s=float(args_cli.video_track_s),
+            num_robots=int(args_cli.video_num_robots),
+        )
+        needed = cam_director.total_steps
+        if video_length is None:
+            video_length = needed
+        else:
+            video_length = max(int(video_length), needed)
+
+        env = StableRgbRenderWrapper(env)
+        video_recorder = RealTimeVideoRecorder(
+            env,
+            video_folder=os.path.join(log_dir, "videos", "play"),
+            fps=VideoCameraDirector.TARGET_VIDEO_FPS,
+            step_dt=float(dt),
+        )
+        print(
+            f"[INFO] --video choreography ({args_cli.task}): "
+            f"{args_cli.video_overview_s:.1f}s high overview of all envs → "
+            f"{cam_director.num_robots} robots × {args_cli.video_track_s:.1f}s "
+            f"(cut to nearest). {video_length} steps ≈ {cam_director.total_duration_s:.1f}s "
+            f"@ {VideoCameraDirector.TARGET_VIDEO_FPS} fps real-time."
+        )
 
     env = SkrlVecEnvWrapper(env, ml_framework=args_cli.ml_framework)
     runner = Runner(env, agent_cfg)
@@ -254,6 +332,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         export_skrl_amp_policy_as_jit(runner.agent, export_dir, filename="policy.pt")
 
     obs, _ = env.reset()
+    if cam_director is not None:
+        cam_director.warm_start()
+
     timestep = 0
     while simulation_app.is_running():
         start_time = time.time()
@@ -261,15 +342,25 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             outputs = runner.agent.act(obs, timestep=0, timesteps=0)
             actions = outputs[-1].get("mean_actions", outputs[0])
             obs, _, _, _, _ = env.step(actions)
-        if args_cli.video:
+
+        if cam_director is not None:
+            # Pose for this frame, then settle, then capture (not RecordVideo).
+            cam_director.update(timestep)
+            for _ in range(3):
+                env.unwrapped.sim.render()
+        if video_recorder is not None:
+            video_recorder.capture()
             timestep += 1
-            if timestep >= args_cli.video_length:
+            if timestep >= video_length:
                 break
+
         if args_cli.real_time:
             sleep_time = dt - (time.time() - start_time)
             if sleep_time > 0:
                 time.sleep(sleep_time)
 
+    if video_recorder is not None:
+        video_recorder.close()
     env.close()
 
 

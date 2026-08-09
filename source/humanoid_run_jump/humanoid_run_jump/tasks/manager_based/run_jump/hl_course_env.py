@@ -143,15 +143,18 @@ class HlCourseEnv(JumpAmpEnv):
         self._hl_curriculum_stage = 0
         self._hl_clear_hist: list[float] = []
 
-        # Optional ground markers: plant band, d*, and the current- vs
-        # required-speed footfall chains.
+        # Optional ground markers: plant band / footfalls and/or start/end lines.
         self._plant_vis = None
-        if getattr(cfg, "show_plant_target", False):
+        show_plant = bool(getattr(cfg, "show_plant_target", False))
+        show_lines = bool(getattr(cfg, "show_course_lines", False))
+        if show_plant or show_lines:
             from humanoid_run_jump.tasks.manager_based.run_jump.mdp.hl_plant_vis import (
                 PlantTargetVisualizer,
             )
 
-            self._plant_vis = PlantTargetVisualizer(self)
+            self._plant_vis = PlantTargetVisualizer(
+                self, show_plant=show_plant, show_lines=show_lines
+            )
 
     # ------------------------------------------------------------------
     # Course helpers

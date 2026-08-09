@@ -290,8 +290,10 @@ class G1RunJumpHLEnvCfg(ManagerBasedRLEnvCfg):
     # X spacing is scene.env_spacing (32 m). Y lives here because InteractiveScene
     # treats unknown scene-cfg fields as assets.
     env_spacing_y: float = 8.0
-    # Draw right-foot plant band (d* ± 0.24 m) on the ground. Off for train.
+    # Draw right-foot plant band / footfalls. Off for train.
     show_plant_target: bool = False
+    # Draw course start/end lines (kept on for --video even when plant markers are off).
+    show_course_lines: bool = False
 
     def __post_init__(self):
         self.decimation = 4
@@ -316,6 +318,7 @@ class G1RunJumpHLEnvCfg_PLAY(G1RunJumpHLEnvCfg):
         self.episode_length_s = 40.0
         self.curriculum.hl_course = None
         self.show_plant_target = True
+        self.show_course_lines = True
         # Full course difficulty in play.
         self.events.randomize_course.params["height_range"] = (0.20, 0.75)
         self.events.randomize_course.params["max_obstacles"] = 3

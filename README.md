@@ -60,12 +60,23 @@ Train the HL with `--task Nepher-G1-RunJumpHL-v0 --algorithm PPO` (three LL mode
 
 ```bash
 isaaclab.bat -p scripts/skrl/play.py --task Nepher-G1-Run-Play-v0 --num_envs 16
+# Video: 3s high overview of all envs, then track 3 robots × ~12s (cut to nearest).
+isaaclab.bat -p scripts/skrl/play.py --task Nepher-G1-Run-Play-v0 --num_envs 16 --video
 isaaclab.bat -p scripts/skrl/play.py --task Nepher-G1-Jump-Play-v0 --num_envs 1
 isaaclab.bat -p scripts/skrl/play.py --task Nepher-G1-Jump-Play-v0 --num_envs 1 --h 0.50 --flight 1.00
+# Jump video: same choreography; side-tracking so the obstacle + flight arc stay in frame.
+isaaclab.bat -p scripts/skrl/play.py --task Nepher-G1-Jump-Play-v0 --num_envs 16 --video
 isaaclab.bat -p scripts/skrl/play.py --task Nepher-G1-RunJumpHL-Play-v0 --algorithm PPO --num_envs 4
 ```
 
 Defaults for jump play: `h=0.40`, `flight=0.70`. Latest checkpoint is used if `--checkpoint` is omitted; play also exports TorchScript next to it.
+
+With `--video` (see `scripts/skrl/play_video.py`):
+1. **3 s** high overview of the full env grid
+2. Track **3 robots × ~12 s** each
+3. Between takes, cut to the **nearest** unfilmed robot
+
+Playback is real-time (~25 fps). Jump uses a side track so the hurdle stays visible. Use `--num_envs 16` so there are robots to cut between. Tunables: `--video_overview_s`, `--video_track_s`, `--video_num_robots`.
 
 ## Jump (overview)
 
@@ -230,7 +241,9 @@ isaaclab.bat -p scripts/skrl/play.py --task Nepher-G1-RunJumpHL-Play-v0 --algori
 # Green pad = right-foot plant band [0.90, 1.20] m; yellow sphere = grid d*.
 # Red spheres  = right plants if the robot holds its current speed.
 # Cyan spheres = right plants at the required speed; the last one sits on d*.
-# Train/play: on without --headless; force off with --no-show_plant_target.
+# White stripe = course start (s=0); orange stripe = finish (s=path_length).
+# Play: plant markers on by default, off with --video; start/end lines always on.
+# Train: plant markers on without --headless; force off with --no-show_plant_target.
 isaaclab.bat -p scripts/smoke_hl_standoff_sweep.py --headless --num_envs 16
 ```
 

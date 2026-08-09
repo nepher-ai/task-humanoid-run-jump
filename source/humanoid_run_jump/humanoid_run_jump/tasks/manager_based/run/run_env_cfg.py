@@ -19,7 +19,6 @@ from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 from isaaclab_tasks.manager_based.locomotion.velocity.mdp import (
@@ -28,6 +27,7 @@ from isaaclab_tasks.manager_based.locomotion.velocity.mdp import (
 )
 
 from humanoid_run_jump.robots.g1 import G1_CFG
+from humanoid_run_jump.tasks.manager_based.finite_ground import FiniteGroundTerrainImporterCfg
 from humanoid_run_jump.tasks.manager_based.run import mdp
 from humanoid_run_jump.tasks.manager_based.run.mdp.actions import TrackerActionCfg
 
@@ -38,7 +38,9 @@ from humanoid_run_jump.tasks.manager_based.run.mdp.actions import TrackerActionC
 
 @configclass
 class RunSceneCfg(InteractiveSceneCfg):
-    terrain = TerrainImporterCfg(
+    # Finite ground (not Isaac Lab's default 2e6 m plane) — avoids depth-buffer
+    # shimmer / white-plane flicker in play / --video overview shots.
+    terrain = FiniteGroundTerrainImporterCfg(
         prim_path="/World/ground",
         terrain_type="plane",
         collision_group=-1,

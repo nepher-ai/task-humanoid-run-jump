@@ -80,9 +80,37 @@ _PLANT_REQ_CFG = VisualizationMarkersCfg(
     },
 )
 
+# Course start line (s = 0) across the corridor.
+_START_LINE_CFG = VisualizationMarkersCfg(
+    prim_path="/Visuals/HL/start_line",
+    markers={
+        "line": sim_utils.CuboidCfg(
+            size=(1.0, 1.0, 1.0),
+            visual_material=sim_utils.PreviewSurfaceCfg(
+                diffuse_color=(1.0, 1.0, 1.0),
+                opacity=0.90,
+            ),
+        ),
+    },
+)
+
+# Course finish line (s = path_length) across the corridor.
+_END_LINE_CFG = VisualizationMarkersCfg(
+    prim_path="/Visuals/HL/end_line",
+    markers={
+        "line": sim_utils.CuboidCfg(
+            size=(1.0, 1.0, 1.0),
+            visual_material=sim_utils.PreviewSurfaceCfg(
+                diffuse_color=(0.95, 0.35, 0.05),
+                opacity=0.90,
+            ),
+        ),
+    },
+)
+
 
 class PlantTargetVisualizer:
-    """Draw the plant band plus the current-speed and required-speed footfall chains.
+    """Draw the plant band, footfall chains, and course start/end lines.
 
     - Green pad: the legal band ``[PLANT_BAND_MIN, PLANT_BAND_MAX]``.
     - Yellow sphere: grid ``d*`` for the policy's current ``(flight, vx)``.
@@ -93,6 +121,8 @@ class PlantTargetVisualizer:
       n_commit``, i.e. the plan the ``lattice_cmd_speed`` reward steers ``vx_cmd``
       toward. Because the plan is deadbeat, the last cyan dot sits exactly on the
       yellow ``d*`` sphere.
+    - White stripe: course start line at ``s = 0``.
+    - Orange stripe: course finish line at ``s = path_length``.
 
     Both chains start from the last completed right plant so they stay put while
     the foot is in the air. The gap between the two chains is the stride — and so
@@ -105,9 +135,15 @@ class PlantTargetVisualizer:
         lateral_width: float = 0.55,
         pad_height: float = 0.02,
         chain_offset_y: float = 0.16,
+        line_thickness: float = 0.08,
+        line_height: float = 0.04,
+        show_plant: bool = True,
+        show_lines: bool = True,
     ):
         self.env = env
         self.device = env.device
+        self.show_plant = bool(show_plant)
+        self.show_lines = bool(show_lines)
         self.band_lo = float(PLANT_BAND_MIN)
         self.band_hi = float(PLANT_BAND_MAX)
         self.band_width = self.band_hi - self.band_lo
@@ -115,12 +151,24 @@ class PlantTargetVisualizer:
         self.lateral_width = float(lateral_width)
         self.pad_height = float(pad_height)
         self.chain_offset_y = float(chain_offset_y)
-        self.zone = VisualizationMarkers(_PLANT_ZONE_CFG)
-        self.center = VisualizationMarkers(_PLANT_CENTER_CFG)
-        self.now = VisualizationMarkers(_PLANT_NOW_CFG)
-        self.req = VisualizationMarkers(_PLANT_REQ_CFG)
-        for m in (self.zone, self.center, self.now, self.req):
-            m.set_visibility(True)
+        self.line_thickness = float(line_thickness)
+        self.line_height = float(line_height)
+        # Full corridor span (same half-width the out-of-path termination uses).
+        self.corridor_width = 2.0 * float(getattr(env, "out_of_path_half_width", 2.5))
+        self.zone = self.center = self.now = self.req = None
+        self.start_line = self.end_line = None
+        if self.show_plant:
+            self.zone = VisualizationMarkers(_PLANT_ZONE_CFG)
+            self.center = VisualizationMarkers(_PLANT_CENTER_CFG)
+            self.now = VisualizationMarkers(_PLANT_NOW_CFG)
+            self.req = VisualizationMarkers(_PLANT_REQ_CFG)
+            for m in (self.zone, self.center, self.now, self.req):
+                m.set_visibility(True)
+        if self.show_lines:
+            self.start_line = VisualizationMarkers(_START_LINE_CFG)
+            self.end_line = VisualizationMarkers(_END_LINE_CFG)
+            for m in (self.start_line, self.end_line):
+                m.set_visibility(True)
         self._quat = torch.zeros(env.num_envs, 4, device=self.device)
         self._quat[:, 0] = 1.0
         self._chain_quat = torch.zeros(env.num_envs * _CHAIN_STEPS, 4, device=self.device)
@@ -169,9 +217,34 @@ class PlantTargetVisualizer:
 
     # -- main ---------------------------------------------------------------
 
+    def _draw_line(self, markers: VisualizationMarkers, s: torch.Tensor) -> None:
+        """Thin stripe across the corridor at course coordinate ``s`` (per env)."""
+        origins = self.env.scene.env_origins
+        n = self.env.num_envs
+        pos = origins.clone()
+        pos[:, 0] = origins[:, 0] + s
+        pos[:, 1] = origins[:, 1]
+        pos[:, 2] = self.line_height * 0.5
+        scale = torch.zeros(n, 3, device=self.device)
+        scale[:, 0] = self.line_thickness
+        scale[:, 1] = self.corridor_width
+        scale[:, 2] = self.line_height
+        markers.visualize(translations=pos, orientations=self._quat, scales=scale)
+
     def update(self) -> None:
         env = self.env
         n = env.num_envs
+
+        if self.show_lines:
+            path_length = getattr(env, "path_length", None)
+            if path_length is None:
+                path_length = torch.full((n,), 25.0, device=self.device)
+            self._draw_line(self.start_line, torch.zeros(n, device=self.device))
+            self._draw_line(self.end_line, path_length)
+
+        if not self.show_plant:
+            return
+
         origins = env.scene.env_origins
         has = env.has_next_obstacle
         front_s = env.next_front_s
@@ -241,5 +314,6 @@ class PlantTargetVisualizer:
         self._emit(self.req, req_s, req_valid, self.chain_offset_y, z)
 
     def set_visibility(self, visible: bool) -> None:
-        for m in (self.zone, self.center, self.now, self.req):
-            m.set_visibility(visible)
+        for m in (self.zone, self.center, self.now, self.req, self.start_line, self.end_line):
+            if m is not None:
+                m.set_visibility(visible)
