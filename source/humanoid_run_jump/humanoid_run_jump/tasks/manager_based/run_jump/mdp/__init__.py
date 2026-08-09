@@ -7,6 +7,7 @@
 
 from humanoid_run_jump.tasks.manager_based.jump.mdp.events import (
     reset_from_runin_bank,
+    reset_from_runin_bank_envhub,
     reset_root_and_joints,
 )
 from humanoid_run_jump.tasks.manager_based.jump.mdp.observations import reduced_coords_proprio
@@ -15,7 +16,7 @@ from humanoid_run_jump.tasks.manager_based.jump.mdp.terminations import update_j
 from .hl_actions import HierarchicalSwitchAction, HierarchicalSwitchActionCfg
 from .hl_commands import HlVelocityCommand, HlVelocityCommandCfg
 from .hl_curriculums import hl_course_levels
-from .hl_events import randomize_hl_course
+from .hl_events import randomize_hl_course, randomize_hl_course_from_envhub
 from .hl_observations import (
     body_state,
     course_features,
@@ -64,7 +65,9 @@ __all__ = [
     "HlVelocityCommandCfg",
     "hl_course_levels",
     "randomize_hl_course",
+    "randomize_hl_course_from_envhub",
     "reset_from_runin_bank",
+    "reset_from_runin_bank_envhub",
     "reset_root_and_joints",
     "reduced_coords_proprio",
     "body_state",

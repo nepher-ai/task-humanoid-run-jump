@@ -349,6 +349,111 @@ def reset_from_runin_bank(
     asset.write_joint_state_to_sim(dof_pos, dof_vel, None, sel_ids)
 
 
+def reset_from_runin_bank_envhub(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor,
+    preset_cfg,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    pose_range: dict[str, tuple[float, float]] | None = None,
+):
+    """Deterministic EnvHub run-in reset for fair tournament evaluation.
+
+    Loads the organizer bank from ``preset_cfg.bank_path`` (EnvHub bundle) and
+    selects rows with ``preset_cfg.gen_runin_index(env_ids)``. Unlike
+    :func:`reset_from_runin_bank`, there is no random sampling and a missing
+    bank raises ``FileNotFoundError`` instead of falling back to standing.
+    """
+    if len(env_ids) == 0:
+        return
+
+    from pathlib import Path
+
+    bank_path = getattr(preset_cfg, "bank_path", None)
+    if not bank_path:
+        raise FileNotFoundError(
+            "EnvHub preset is missing bank_path; expected organizer runin_states.pt "
+            "inside the EnvHub course bundle."
+        )
+    path = Path(bank_path)
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"EnvHub run-in bank not found: {path}. "
+            "Tournament eval requires the organizer bank shipped with the EnvHub "
+            "bundle (do not substitute a miner-local motions/packaged bank)."
+        )
+
+    cache_key = f"_runin_bank_envhub:{path.resolve()}"
+    bank = getattr(env, cache_key, None)
+    if bank is None:
+        payload = torch.load(path, map_location=env.device, weights_only=False)
+        for key in ("root_pose", "root_vel", "dof_pos", "dof_vel"):
+            if key not in payload:
+                raise KeyError(f"EnvHub run-in bank {path} missing key {key!r}")
+        bank = {
+            "root_pose": payload["root_pose"].to(env.device),
+            "root_vel": payload["root_vel"].to(env.device),
+            "dof_pos": payload["dof_pos"].to(env.device),
+            "dof_vel": payload["dof_vel"].to(env.device),
+            "path": str(path.resolve()),
+        }
+        setattr(env, cache_key, bank)
+        # Also stash under the legacy attr so other helpers can inspect size.
+        env._runin_bank_envhub = bank
+        print(
+            f"[reset_from_runin_bank_envhub] loaded {bank['root_pose'].shape[0]} "
+            f"states from {path}"
+        )
+
+    n_bank = int(bank["root_pose"].shape[0])
+    if n_bank == 0:
+        raise RuntimeError(f"EnvHub run-in bank is empty: {path}")
+
+    ids = env_ids.to(device=env.device, dtype=torch.long)
+    n = len(ids)
+    idx = preset_cfg.gen_runin_index(ids, device=env.device)
+    if int(idx.min().item()) < 0 or int(idx.max().item()) >= n_bank:
+        raise IndexError(
+            f"EnvHub runin_index out of range for bank size {n_bank}: "
+            f"min={int(idx.min().item())} max={int(idx.max().item())}"
+        )
+
+    jmap = getattr(env, "joint_order_map", None)
+    if jmap is None:
+        from humanoid_run_jump.robots.joint_order import JointOrderMap
+
+        asset = env.scene[asset_cfg.name]
+        jmap = JointOrderMap(list(asset.data.joint_names), device=env.device)
+
+    root_pose = bank["root_pose"][idx].clone()
+    root_vel = bank["root_vel"][idx].clone()
+    dof_pos = jmap.to_sim(bank["dof_pos"][idx].clone())
+    dof_vel = jmap.to_sim(bank["dof_vel"][idx].clone())
+
+    if pose_range is None:
+        pose_range = {"x": (0.0, 0.0), "y": (0.0, 0.0), "yaw": (0.0, 0.0)}
+    root_pose[:, :2] = env.scene.env_origins[ids, :2]
+    root_pose[:, 0] += sample_uniform(*pose_range.get("x", (0.0, 0.0)), n, env.device)
+    root_pose[:, 1] += sample_uniform(*pose_range.get("y", (0.0, 0.0)), n, env.device)
+
+    bank_yaw = _yaw_from_wxyz(root_pose[:, 3:7])
+    dyaw = sample_uniform(*pose_range.get("yaw", (0.0, 0.0)), n, env.device) - bank_yaw
+    root_pose[:, 3:7] = _apply_yaw_wxyz(root_pose[:, 3:7], dyaw)
+
+    c = torch.cos(dyaw)
+    s = torch.sin(dyaw)
+    vx, vy = root_vel[:, 0].clone(), root_vel[:, 1].clone()
+    root_vel[:, 0] = c * vx - s * vy
+    root_vel[:, 1] = s * vx + c * vy
+    wx, wy = root_vel[:, 3].clone(), root_vel[:, 4].clone()
+    root_vel[:, 3] = c * wx - s * wy
+    root_vel[:, 4] = s * wx + c * wy
+
+    asset = env.scene[asset_cfg.name]
+    asset.write_root_pose_to_sim(root_pose, ids)
+    asset.write_root_velocity_to_sim(root_vel, ids)
+    asset.write_joint_state_to_sim(dof_pos, dof_vel, None, ids)
+
+
 def sample_uniform(
     low: float, high: float, size, device
 ) -> torch.Tensor:

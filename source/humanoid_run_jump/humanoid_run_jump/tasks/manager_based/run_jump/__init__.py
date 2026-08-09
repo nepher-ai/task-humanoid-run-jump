@@ -28,3 +28,23 @@ gym.register(
         "skrl_cfg_entry_point": f"{agents.__name__}:skrl_cfg.yaml",
     },
 )
+
+gym.register(
+    id="Nepher-G1-RunJumpHL-Envhub-v0",
+    entry_point="humanoid_run_jump.tasks.manager_based.run_jump.hl_course_env:HlCourseEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.hl_env_cfg_envhub:G1RunJumpHLEnvCfg_Envhub",
+        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_cfg.yaml",
+    },
+)
+
+gym.register(
+    id="Nepher-G1-RunJumpHL-Envhub-Play-v0",
+    entry_point="humanoid_run_jump.tasks.manager_based.run_jump.hl_course_env:HlCourseEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.hl_env_cfg_envhub:G1RunJumpHLEnvCfg_Envhub_PLAY",
+        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_cfg.yaml",
+    },
+)

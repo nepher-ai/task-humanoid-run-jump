@@ -8,7 +8,7 @@
 from .actions import JointPdAction, JointPdActionCfg, TrackerAction, TrackerActionCfg
 from .commands import JumpCommand, JumpCommandCfg
 from .curriculums import jump_cmd_levels, lin_vel_cmd_levels
-from .events import reset_from_runin_bank, reset_root_and_joints
+from .events import reset_from_runin_bank, reset_from_runin_bank_envhub, reset_root_and_joints
 from .jump_envelope import (
     APEX_ASYM_MIN,
     ARM_SPAN_APEX,
@@ -97,6 +97,7 @@ __all__ = [
     "jump_cmd_levels",
     "lin_vel_cmd_levels",
     "reset_from_runin_bank",
+    "reset_from_runin_bank_envhub",
     "reset_root_and_joints",
     "APEX_ASYM_MIN",
     "ARM_SPAN_APEX",

@@ -83,9 +83,18 @@ class HlSceneCfg(InteractiveSceneCfg):
         prim_path="/World/skyLight",
         spawn=sim_utils.DomeLightCfg(intensity=3000.0, color=(0.75, 0.75, 0.75)),
     )
+    # Ten parked cuboid slots (EnvHub may activate up to 10). Train still caps
+    # active hurdles via course_max_obstacles / event max_obstacles (= 3).
     obstacle_0 = _make_obstacle_cfg(0)
     obstacle_1 = _make_obstacle_cfg(1)
     obstacle_2 = _make_obstacle_cfg(2)
+    obstacle_3 = _make_obstacle_cfg(3)
+    obstacle_4 = _make_obstacle_cfg(4)
+    obstacle_5 = _make_obstacle_cfg(5)
+    obstacle_6 = _make_obstacle_cfg(6)
+    obstacle_7 = _make_obstacle_cfg(7)
+    obstacle_8 = _make_obstacle_cfg(8)
+    obstacle_9 = _make_obstacle_cfg(9)
 
 
 @configclass

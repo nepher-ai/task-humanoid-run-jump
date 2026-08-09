@@ -15,12 +15,14 @@ from humanoid_run_jump.tasks.manager_based.jump.mdp.gait import (
     foot_contact_mask,
     resolve_ankle_body_ids,
 )
+from humanoid_run_jump.tasks.manager_based.jump.mdp.observations import amp_obs_single
 from humanoid_run_jump.tasks.manager_based.run_jump.mdp.hl_stride import (
     PLANT_EDGE_SIGMA,
     StrideTracker,
     d_star,
 )
 from isaaclab.managers import SceneEntityCfg
+
 
 MODE_RUN = 0
 MODE_JUMP = 1
@@ -43,15 +45,17 @@ class HlCourseEnv(JumpAmpEnv):
     """Obstacle-course env for a PPO high-level policy over frozen LL actors.
 
     Subclasses :class:`JumpAmpEnv` to reuse the jump phase machine / ``_ep_*``
-    buffers. AMP is disabled (``motion_file=None``) and :meth:`step` skips the
-    AMP buffer write.
+    buffers. Reference-motion AMP is disabled (``motion_file=None``). When
+    ``num_amp_observations >= 1`` (EnvHub eval uses 2), the AMP observation
+    buffer is still updated each step for style scoring.
     """
 
     def __init__(self, cfg, render_mode: str | None = None, **kwargs):
-        # Ensure AMP is off before JumpAmpEnv.__init__ builds the motion lib.
+        # Ensure AMP motion lib is off before JumpAmpEnv.__init__.
         if getattr(cfg, "motion_file", None):
             cfg.motion_file = None
         cfg.num_amp_observations = getattr(cfg, "num_amp_observations", 1)
+
 
         # ManagerBasedEnv hard-codes InteractiveScene; swap in the anisotropic
         # HL scene for the duration of parent construction.
@@ -326,7 +330,7 @@ class HlCourseEnv(JumpAmpEnv):
         self.refresh_course_features()
 
     def step(self, action: torch.Tensor):
-        # Skip AMP buffer maintenance from JumpAmpEnv.step.
+        # Skip JumpAmpEnv.step (motion-lib AMP rewards) but keep ManagerBasedRLEnv.
         obs, rewards, terminated, truncated, extras = ManagerBasedRLEnv.step(self, action)
         done = terminated | truncated
         # Finalize jump success metrics for finished envs (same as JumpAmpEnv).
@@ -361,6 +365,14 @@ class HlCourseEnv(JumpAmpEnv):
             for k, v in list(log.items()):
                 if isinstance(v, (int, float)) and not isinstance(v, bool):
                     log[k] = torch.tensor(float(v), device=self.device)
+
+        # Maintain AMP observation window for EnvHub style discriminators.
+        if getattr(self, "amp_observation_buffer", None) is not None and self.num_amp_observations >= 1:
+            if self.num_amp_observations > 1:
+                self.amp_observation_buffer[:, 1:] = self.amp_observation_buffer[:, :-1].clone()
+            self.amp_observation_buffer[:, 0] = amp_obs_single(self)
+            extras["amp_obs"] = self.amp_observation_buffer.view(self.num_envs, -1)
+
         if self._plant_vis is not None:
             self._plant_vis.update()
         return obs, rewards, terminated, truncated, extras
