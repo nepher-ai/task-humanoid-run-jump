@@ -74,10 +74,6 @@ pip install -e ../envhub
 
 isaaclab.bat -p scripts/skrl/play.py \
   --task Nepher-G1-RunJumpHL-Envhub-Play-v0 --algorithm PPO --num_envs 16
-
-pip install -e ../eval-nav
-cd ../eval-nav
-python scripts/evaluate.py --config configs/task-humanoid-run-jump.yaml --headless
 ```
 
 ## Scripts
