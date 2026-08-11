@@ -10,7 +10,7 @@ expected by the eval-nav framework:
 
   ``task_completed``      – bool tensor (num_envs,): course finished
   ``task_failed``         – bool tensor: crash / path / fall terminations
-  ``get_locomotion_data`` – per-step scalars: speed_2d, yaw_rate, style_score, …
+  ``get_locomotion_data`` – per-step scalars: speed_2d, clearance, impact, …
   ``_log_state``          – dict snapshot for StateLogger
   ``_log_metadata``       – episode-level metadata
   ``wrap_for_eval``       – factory function used by EnvironmentManager
@@ -18,10 +18,10 @@ expected by the eval-nav framework:
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import torch
+from isaaclab.managers import SceneEntityCfg
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -38,18 +38,28 @@ _FAILURE_TERMS = (
 MODE_RUN = 0
 MODE_JUMP = 1
 
+# Landing-impact probe: peak downward root vz over a short post-touchdown window.
+IMPACT_WINDOW_STEPS = 8
+CLEARANCE_MARGIN_M = 0.15
+
 
 class EvalCompatEnv:
     """Thin wrapper that surfaces RunJumpHL env state for eval-nav."""
 
     def __init__(self, env: "ManagerBasedRLEnv"):
         self._env = env
-        self._run_disc: torch.jit.ScriptModule | None = None
-        self._jump_disc: torch.jit.ScriptModule | None = None
-        self._style_cache: torch.Tensor | None = None
-        self._style_step: int = -1
         self._control_steps: int = 0
-        self._load_style_discriminators()
+        self._sensor_cfg = SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link")
+        try:
+            self._sensor_cfg.resolve(self._env.unwrapped.scene)
+        except Exception:
+            pass
+        n = int(self._env.unwrapped.num_envs)
+        device = self._env.unwrapped.device
+        self._prev_both_contact = torch.zeros(n, dtype=torch.bool, device=device)
+        self._impact_timer = torch.zeros(n, dtype=torch.long, device=device)
+        self._impact_peak_vz = torch.zeros(n, device=device)
+        self._impact_emit = torch.full((n,), -1.0, device=device)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._env, name)
@@ -57,76 +67,6 @@ class EvalCompatEnv:
     @property
     def unwrapped(self):
         return self._env.unwrapped
-
-    # ------------------------------------------------------------------
-    # Style discriminators (EnvHub organizer assets)
-    # ------------------------------------------------------------------
-
-    def _resolve_preset(self) -> Any:
-        cfg = getattr(self._env.unwrapped, "cfg", None)
-        if cfg is None:
-            return None
-        return getattr(cfg, "_envhub_preset", None)
-
-    def _load_style_discriminators(self) -> None:
-        """Load run/jump TorchScript discriminators from the EnvHub preset."""
-        preset = self._resolve_preset()
-        if preset is None:
-            raise FileNotFoundError(
-                "EvalCompatEnv requires an EnvHub preset on the env cfg "
-                "(`cfg._envhub_preset`) to load style discriminators."
-            )
-        run_path = Path(getattr(preset, "run_discriminator_path", "") or "")
-        jump_path = Path(getattr(preset, "jump_discriminator_path", "") or "")
-        if not run_path.is_file():
-            raise FileNotFoundError(
-                f"Missing EnvHub run discriminator: {run_path}\n"
-                "Place organizer `run_discriminator.pt` in humanoid-runjump-course-v1."
-            )
-        if not jump_path.is_file():
-            raise FileNotFoundError(
-                f"Missing EnvHub jump discriminator: {jump_path}\n"
-                "Place organizer `jump_discriminator.pt` in humanoid-runjump-course-v1."
-            )
-        device = self._env.unwrapped.device
-        self._run_disc = torch.jit.load(str(run_path), map_location=device)
-        self._jump_disc = torch.jit.load(str(jump_path), map_location=device)
-        self._run_disc.eval()
-        self._jump_disc.eval()
-
-    def _amp_obs_batch(self) -> torch.Tensor:
-        env = self._env.unwrapped
-        buf = getattr(env, "amp_observation_buffer", None)
-        if buf is None:
-            raise RuntimeError(
-                "HL env has no amp_observation_buffer; EnvHub Play must set "
-                "num_amp_observations=2 and update the buffer each step."
-            )
-        return buf.view(env.num_envs, -1)
-
-    def _refresh_style_cache(self) -> None:
-        """Score all envs once per control step (cached for per-env queries)."""
-        if self._style_cache is not None and self._style_step == self._control_steps:
-            return
-        if self._run_disc is None or self._jump_disc is None:
-            raise RuntimeError("Style discriminators are not loaded")
-
-        env = self._env.unwrapped
-        amp_obs = self._amp_obs_batch()
-        mode = getattr(env, "hl_mode", None)
-        if mode is None:
-            mode = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
-        else:
-            mode = mode.long()
-
-        with torch.inference_mode():
-            run_logits = self._run_disc(amp_obs).view(env.num_envs, -1)[:, 0]
-            jump_logits = self._jump_disc(amp_obs).view(env.num_envs, -1)[:, 0]
-            logits = torch.where(mode == MODE_JUMP, jump_logits, run_logits)
-            style = torch.sigmoid(logits)
-
-        self._style_cache = style
-        self._style_step = self._control_steps
 
     # ------------------------------------------------------------------
     # Eval-nav interface: task_completed / task_failed
@@ -180,14 +120,13 @@ class EvalCompatEnv:
     def reset(self, *args, **kwargs):
         out = self._env.reset(*args, **kwargs)
         self._control_steps = 0
-        self._style_cache = None
-        self._style_step = -1
+        self._reset_impact_probe()
         return out
 
     def step(self, action):
         out = self._env.step(action)
         self._control_steps += 1
-        self._style_cache = None
+        self._update_impact_probe()
         return out
 
     def close(self):
@@ -196,6 +135,68 @@ class EvalCompatEnv:
     def render(self, *args, **kwargs):
         if hasattr(self._env, "render"):
             return self._env.render(*args, **kwargs)
+
+    # ------------------------------------------------------------------
+    # Landing-impact probe (peak downward root vz after JUMP touchdown)
+    # ------------------------------------------------------------------
+
+    def _reset_impact_probe(self) -> None:
+        env = self._env.unwrapped
+        n = int(env.num_envs)
+        device = env.device
+        self._prev_both_contact = torch.zeros(n, dtype=torch.bool, device=device)
+        self._impact_timer = torch.zeros(n, dtype=torch.long, device=device)
+        self._impact_peak_vz = torch.zeros(n, device=device)
+        self._impact_emit = torch.full((n,), -1.0, device=device)
+
+    def _both_foot_contact(self) -> torch.Tensor:
+        from humanoid_run_jump.tasks.manager_based.jump.mdp.gait import foot_contact_mask
+
+        contacts = foot_contact_mask(self._env.unwrapped, sensor_cfg=self._sensor_cfg)
+        return contacts[:, 0] & contacts[:, 1]
+
+    def _update_impact_probe(self) -> None:
+        """Arm on dual-foot rising edge while JUMP; emit peak -vz after window."""
+        env = self._env.unwrapped
+        n = int(env.num_envs)
+        if self._impact_timer.numel() != n:
+            self._reset_impact_probe()
+
+        self._impact_emit.fill_(-1.0)
+
+        mode = getattr(env, "hl_mode", None)
+        if mode is None:
+            mode = torch.zeros(n, dtype=torch.long, device=env.device)
+        else:
+            mode = mode.long()
+
+        both = self._both_foot_contact()
+        rising = both & (~self._prev_both_contact) & (mode == MODE_JUMP)
+        if rising.any():
+            self._impact_timer = torch.where(
+                rising,
+                torch.full_like(self._impact_timer, IMPACT_WINDOW_STEPS),
+                self._impact_timer,
+            )
+            self._impact_peak_vz = torch.where(
+                rising, torch.zeros_like(self._impact_peak_vz), self._impact_peak_vz
+            )
+
+        active = self._impact_timer > 0
+        if active.any():
+            vz_w = env.scene["robot"].data.root_lin_vel_w[:, 2]
+            down = (-vz_w).clamp(min=0.0)
+            self._impact_peak_vz = torch.where(
+                active, torch.maximum(self._impact_peak_vz, down), self._impact_peak_vz
+            )
+            self._impact_timer = torch.where(
+                active, self._impact_timer - 1, self._impact_timer
+            )
+            done = active & (self._impact_timer == 0)
+            if done.any():
+                self._impact_emit = torch.where(done, self._impact_peak_vz, self._impact_emit)
+
+        self._prev_both_contact = both
 
     # ------------------------------------------------------------------
     # Locomotion data (consumed by EpisodeRunner for per-step logging)
@@ -218,13 +219,12 @@ class EvalCompatEnv:
         if hasattr(env, "obstacle_index"):
             obstacle_index = int(env.obstacle_index[idx].cpu().item())
 
-        self._refresh_style_cache()
-        assert self._style_cache is not None
-        style_score = float(self._style_cache[idx].cpu().item())
-        mode = getattr(env, "hl_mode", None)
-        hl_mode = float(mode[idx].cpu().item()) if mode is not None else 0.0
+        action_l2 = 0.0
+        hl = getattr(env, "last_hl_action", None)
+        if hl is not None:
+            action_l2 = float(torch.norm(hl[idx]).cpu().item())
 
-        return {
+        out: dict[str, float] = {
             "speed_2d": speed_2d,
             "lateral_speed": float(torch.abs(lin_vel[1]).cpu().item()),
             "vertical_speed": float(torch.abs(lin_vel[2]).cpu().item()),
@@ -232,9 +232,35 @@ class EvalCompatEnv:
             "roll_pitch_rate": float(torch.norm(ang_vel[:2]).cpu().item()),
             "cleared_count": float(cleared),
             "obstacle_index": float(obstacle_index),
-            "style_score": style_score,
-            "hl_mode": hl_mode,
+            "action_l2": action_l2,
         }
+
+        apex_event = getattr(env, "apex_event", None)
+        if apex_event is not None and bool(apex_event[idx].cpu().item()):
+            peak_z = float(env.apex_peak_z[idx].cpu().item())
+            hurdle_h = 0.0
+            has_next = getattr(env, "has_next_obstacle", None)
+            if has_next is not None and bool(has_next[idx].cpu().item()):
+                hurdle_h = float(env.next_h[idx].cpu().item())
+            elif hasattr(env, "obstacle_h") and obstacle_index > 0:
+                hurdle_h = float(env.obstacle_h[idx, obstacle_index - 1].cpu().item())
+            elif hasattr(env, "obstacle_h"):
+                hurdle_h = float(env.obstacle_h[idx, max(obstacle_index, 0)].cpu().item())
+            clearance_m = peak_z - hurdle_h
+            out["apex_clearance_score"] = float(
+                max(0.0, min(1.0, clearance_m / CLEARANCE_MARGIN_M))
+            )
+            out["apex_err"] = float(env.apex_err[idx].cpu().item())
+
+        stable = getattr(env, "stable_clear_event", None)
+        if stable is not None and bool(stable[idx].cpu().item()):
+            out["stable_clear"] = 1.0
+
+        emit = float(self._impact_emit[idx].cpu().item())
+        if emit >= 0.0:
+            out["landing_impact_vz"] = emit
+
+        return out
 
     # ------------------------------------------------------------------
     # State logging (consumed by eval-nav StateLogger)

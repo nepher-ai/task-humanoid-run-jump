@@ -5,10 +5,10 @@
 
 """EnvHub-backed G1 RunJumpHL environment configurations.
 
-These configurations replace procedural course randomization and random run-in
-sampling with deterministic scenario data loaded from an EnvHub bundle (e.g.
-``humanoid-runjump-course-v1``). Course layout and run-in bank index are fixed
-per parallel env for fair tournament evaluation.
+These configurations replace procedural course randomization with deterministic
+scenario data loaded from an EnvHub bundle (e.g. ``humanoid-runjump-course-v1``).
+Robots start from a standing pose; course layout is fixed per parallel env for
+fair tournament evaluation.
 
 Usage::
 
@@ -26,11 +26,12 @@ import humanoid_run_jump.tasks.manager_based.run_jump.mdp as mdp
 from .hl_env_cfg import G1RunJumpHLEnvCfg, _CUBOID_HALF_H
 
 _ZERO_POSE = {"x": (0.0, 0.0), "y": (0.0, 0.0), "yaw": (0.0, 0.0)}
+_ZERO_VEL = {"x": (0.0, 0.0), "y": (0.0, 0.0), "z": (0.0, 0.0)}
 
 
 @configclass
 class G1RunJumpHLEnvCfg_Envhub(G1RunJumpHLEnvCfg):
-    """G1 RunJumpHL config backed by an EnvHub course + run-in probe bundle.
+    """G1 RunJumpHL config backed by an EnvHub course bundle (standing starts).
 
     Parameters
     ----------
@@ -61,21 +62,14 @@ class G1RunJumpHLEnvCfg_Envhub(G1RunJumpHLEnvCfg):
             self.scene.env_spacing = float(preset_spacing)
         self.scene.env_spacing = max(self.scene.env_spacing, 62.0)
         self.course_max_obstacles = 10
-        # Match AMP training window so EnvHub style discriminators see 2-frame obs.
-        self.num_amp_observations = 2
 
-        # Deterministic courses + run-in — disable curriculum and pose noise.
+        # Deterministic courses; standing start — disable curriculum, pose noise,
+        # and run-in bank overwrite.
         self.curriculum.hl_course = None
+        self.events.reset_runin = None
 
         self.events.reset_base.params["pose_range"] = dict(_ZERO_POSE)
-        self.events.reset_runin = EventTerm(
-            func=mdp.reset_from_runin_bank_envhub,
-            mode="reset",
-            params={
-                "preset_cfg": preset_cfg,
-                "pose_range": dict(_ZERO_POSE),
-            },
-        )
+        self.events.reset_base.params["velocity_range"] = dict(_ZERO_VEL)
 
         self.events.randomize_course = EventTerm(
             func=mdp.randomize_hl_course_from_envhub,
@@ -99,7 +93,5 @@ class G1RunJumpHLEnvCfg_Envhub_PLAY(G1RunJumpHLEnvCfg_Envhub):
         self.curriculum.hl_course = None
         self.show_plant_target = True
         self.show_course_lines = True
-        # Pose noise already zeroed in Envhub base; keep bank_prob unused
-        # (deterministic EnvHub reset always applies all env_ids).
         self.events.reset_base.params["pose_range"] = dict(_ZERO_POSE)
-        self.events.reset_runin.params["pose_range"] = dict(_ZERO_POSE)
+        self.events.reset_base.params["velocity_range"] = dict(_ZERO_VEL)

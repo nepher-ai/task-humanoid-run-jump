@@ -15,7 +15,6 @@ from humanoid_run_jump.tasks.manager_based.jump.mdp.gait import (
     foot_contact_mask,
     resolve_ankle_body_ids,
 )
-from humanoid_run_jump.tasks.manager_based.jump.mdp.observations import amp_obs_single
 from humanoid_run_jump.tasks.manager_based.run_jump.mdp.hl_stride import (
     PLANT_EDGE_SIGMA,
     StrideTracker,
@@ -45,9 +44,7 @@ class HlCourseEnv(JumpAmpEnv):
     """Obstacle-course env for a PPO high-level policy over frozen LL actors.
 
     Subclasses :class:`JumpAmpEnv` to reuse the jump phase machine / ``_ep_*``
-    buffers. Reference-motion AMP is disabled (``motion_file=None``). When
-    ``num_amp_observations >= 1`` (EnvHub eval uses 2), the AMP observation
-    buffer is still updated each step for style scoring.
+    buffers. Reference-motion AMP is disabled (``motion_file=None``).
     """
 
     def __init__(self, cfg, render_mode: str | None = None, **kwargs):
@@ -365,13 +362,6 @@ class HlCourseEnv(JumpAmpEnv):
             for k, v in list(log.items()):
                 if isinstance(v, (int, float)) and not isinstance(v, bool):
                     log[k] = torch.tensor(float(v), device=self.device)
-
-        # Maintain AMP observation window for EnvHub style discriminators.
-        if getattr(self, "amp_observation_buffer", None) is not None and self.num_amp_observations >= 1:
-            if self.num_amp_observations > 1:
-                self.amp_observation_buffer[:, 1:] = self.amp_observation_buffer[:, :-1].clone()
-            self.amp_observation_buffer[:, 0] = amp_obs_single(self)
-            extras["amp_obs"] = self.amp_observation_buffer.view(self.num_envs, -1)
 
         if self._plant_vis is not None:
             self._plant_vis.update()

@@ -151,7 +151,8 @@ class EventCfg:
         mode="reset",
         params={
             "pose_range": {"x": (-0.05, 0.05), "y": (-0.05, 0.05), "yaw": (-0.05, 0.05)},
-            "velocity_range": {"x": (0.8, 2.0), "y": (-0.1, 0.1), "z": (-0.05, 0.05)},
+            # Standing / near-idle when run-in bank does not overwrite this reset.
+            "velocity_range": {"x": (0.0, 0.2), "y": (-0.05, 0.05), "z": (-0.05, 0.05)},
         },
     )
     reset_runin = EventTerm(
@@ -159,7 +160,8 @@ class EventCfg:
         mode="reset",
         params={
             "bank_path": "motions/packaged/runin_states.pt",
-            "bank_prob": 0.95,
+            # Standing starts only (no run-in bank overwrite).
+            "bank_prob": 0.0,
             "pose_range": {"x": (-0.02, 0.02), "y": (-0.02, 0.02), "yaw": (-0.05, 0.05)},
             "min_fwd_vel": 1.0,
             "max_fwd_vel": 2.5,
@@ -331,6 +333,12 @@ class G1RunJumpHLEnvCfg_PLAY(G1RunJumpHLEnvCfg):
         # Full course difficulty in play.
         self.events.randomize_course.params["height_range"] = (0.20, 0.75)
         self.events.randomize_course.params["max_obstacles"] = 3
-        self.events.reset_runin.params["bank_prob"] = 1.0
+        # Standing starts (match EnvHub eval); disable run-in bank overwrite.
+        self.events.reset_runin.params["bank_prob"] = 0.0
         self.events.reset_base.params["pose_range"] = {"x": (0.0, 0.0), "y": (0.0, 0.0), "yaw": (0.0, 0.0)}
+        self.events.reset_base.params["velocity_range"] = {
+            "x": (0.0, 0.0),
+            "y": (0.0, 0.0),
+            "z": (0.0, 0.0),
+        }
         self.events.reset_runin.params["pose_range"] = {"x": (0.0, 0.0), "y": (0.0, 0.0), "yaw": (0.0, 0.0)}
