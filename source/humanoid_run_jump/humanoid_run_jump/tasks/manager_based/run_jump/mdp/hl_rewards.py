@@ -149,17 +149,30 @@ def course_progress(env: ManagerBasedRLEnv) -> torch.Tensor:
     return delta
 
 
-def stall_cost(env: ManagerBasedRLEnv, vx_min: float = 0.6) -> torch.Tensor:
+def stall_cost(
+    env: ManagerBasedRLEnv,
+    vx_min: float = 0.6,
+    grace_s: float = 2.0,
+) -> torch.Tensor:
     """Cost applied only while the robot is not advancing.
 
     Needed so that waiting in front of an obstacle can never beat attempting it:
     a terminal penalty ``P`` is only safe from the "stall to discount the
     penalty" exploit while ``stall_cost > P * (1 - gamma)``.
+
+    ``grace_s`` skips the cost for the first seconds after reset so a standing
+    start can accelerate under the frozen run policy without immediate penalty.
     """
     ema = getattr(env, "vx_ema", None)
     if ema is None:
         return torch.zeros(env.num_envs, device=env.device)
-    return ((ema < vx_min) & (_mode(env) == MODE_RUN)).float()
+    stalled = (ema < vx_min) & (_mode(env) == MODE_RUN)
+    ep_len = getattr(env, "episode_length_buf", None)
+    if ep_len is not None and grace_s > 0.0:
+        dt = float(getattr(env, "step_dt", 0.02) or 0.02)
+        grace_steps = max(0, int(grace_s / max(dt, 1e-3)))
+        stalled = stalled & (ep_len >= grace_steps)
+    return stalled.float()
 
 
 def lateral_offset(

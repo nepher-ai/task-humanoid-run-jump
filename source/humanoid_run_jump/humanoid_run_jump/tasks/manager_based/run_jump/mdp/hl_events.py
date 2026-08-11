@@ -37,7 +37,8 @@ def _clear_course_buffers(env: ManagerBasedEnv, ids: torch.Tensor, thickness: fl
     env.crash_hold[ids] = 0
     env.s_max[ids] = 0.0
     env.progress_delta[ids] = 0.0
-    env.vx_ema[ids] = 1.5  # neutral run-in speed so the stall term does not fire at t=0
+    # Honest standing start: EMA tracks measured vx (stall uses a short grace instead).
+    env.vx_ema[ids] = 0.0
     env.apex_armed[ids] = False
     env.apex_have_peak[ids] = False
     env.apex_peak_z[ids] = 0.0

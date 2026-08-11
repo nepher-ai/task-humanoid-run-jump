@@ -56,7 +56,8 @@ isaaclab.bat -p scripts/skrl/train.py --task Nepher-G1-RunJumpHL-v0 --algorithm 
 
 Resume with `--checkpoint <agent_*.pt>`.
 
-**HL resets:** standing only (`bank_prob=0`). Procedural course: path 20–30 m,
+**HL resets:** standing only (`bank_prob=0`). First 2 s of `stall_cost` are
+waived so the frozen run policy can accelerate. Procedural course: path 20–30 m,
 up to 3 hurdles, height 0.20–0.75 m.
 
 ## Play

@@ -195,9 +195,14 @@ class RewardsCfg:
 
     # Dense backbone: 2.0 per metre, ≈0.10/step at 2.5 m/s.
     course_progress = RewTerm(func=mdp.course_progress, weight=100.0)
-    # Only bites while stalled; keeps the terminal penalty free of the
-    # "wait to discount the penalty" exploit (needs stall > P*(1-gamma)).
-    stall_cost = RewTerm(func=mdp.stall_cost, weight=-8.0, params={"vx_min": 0.6})
+    # Only bites while stalled after a short standing-start grace; keeps the
+    # terminal penalty free of the "wait to discount the penalty" exploit
+    # (needs stall > P*(1-gamma)).
+    stall_cost = RewTerm(
+        func=mdp.stall_cost,
+        weight=-8.0,
+        params={"vx_min": 0.6, "grace_s": 2.0},
+    )
     lateral_offset = RewTerm(func=mdp.lateral_offset, weight=-3.0)
     heading_align = RewTerm(func=mdp.heading_align, weight=0.5)
 
