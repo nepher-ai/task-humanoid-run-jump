@@ -5,27 +5,29 @@
 
 """Evaluation compatibility wrapper for the G1 RunJumpHL task.
 
-Exposes the internal state of the HL course environment through the interface
-expected by the eval-nav framework:
+Raw-state sampler for eval-nav. Derivation, event detection, and scoring live
+entirely in eval-nav — this wrapper only reads simulator state.
 
-  ``task_completed``      – bool tensor (num_envs,): course finished
-  ``task_failed``         – bool tensor: crash / path / fall terminations
-  ``get_locomotion_data`` – per-step scalars: speed_2d, clearance, impact,
-                            lateral_offset_m, progress_delta_m, …
-  ``_log_state``          – dict snapshot for StateLogger
-  ``_log_metadata``       – episode-level metadata
-  ``wrap_for_eval``       – factory function used by EnvironmentManager
+Exposes:
+  ``task_completed`` / ``task_failed`` – termination truth
+  ``get_raw_state``                    – batched per-step raw physics (num_envs, …)
+  ``_log_state``                       – per-env projection of the same raw dict
+  ``_log_metadata``                    – episode-level course geometry + origins
+  ``wrap_for_eval``                    – factory used by EnvironmentManager
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import torch
 from isaaclab.managers import SceneEntityCfg
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
+
+RAW_STATE_VERSION = 1
 
 _FAILURE_TERMS = (
     "obstacle_crash",
@@ -36,31 +38,24 @@ _FAILURE_TERMS = (
     "bad_orientation",
 )
 
-MODE_RUN = 0
-MODE_JUMP = 1
 
-# Landing-impact probe: peak downward root vz over a short post-touchdown window.
-IMPACT_WINDOW_STEPS = 8
-CLEARANCE_MARGIN_M = 0.15
+def _to_numpy(t: torch.Tensor) -> np.ndarray:
+    return t.detach().cpu().numpy()
 
 
 class EvalCompatEnv:
-    """Thin wrapper that surfaces RunJumpHL env state for eval-nav."""
+    """Thin wrapper that surfaces raw RunJumpHL env state for eval-nav."""
 
     def __init__(self, env: "ManagerBasedRLEnv"):
         self._env = env
-        self._control_steps: int = 0
+        self._cached_raw: dict[str, np.ndarray] | None = None
         self._sensor_cfg = SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link")
         try:
             self._sensor_cfg.resolve(self._env.unwrapped.scene)
         except Exception:
             pass
-        n = int(self._env.unwrapped.num_envs)
-        device = self._env.unwrapped.device
-        self._prev_both_contact = torch.zeros(n, dtype=torch.bool, device=device)
-        self._impact_timer = torch.zeros(n, dtype=torch.long, device=device)
-        self._impact_peak_vz = torch.zeros(n, device=device)
-        self._impact_emit = torch.full((n,), -1.0, device=device)
+        self._ankle_body_names: list[str] = ["left_ankle_roll_link", "right_ankle_roll_link"]
+        self._contact_body_names: list[str] = list(self._ankle_body_names)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._env, name)
@@ -119,16 +114,11 @@ class EvalCompatEnv:
     # ------------------------------------------------------------------
 
     def reset(self, *args, **kwargs):
-        out = self._env.reset(*args, **kwargs)
-        self._control_steps = 0
-        self._reset_impact_probe()
-        return out
+        self._cached_raw = None
+        return self._env.reset(*args, **kwargs)
 
     def step(self, action):
-        out = self._env.step(action)
-        self._control_steps += 1
-        self._update_impact_probe()
-        return out
+        return self._env.step(action)
 
     def close(self):
         return self._env.close()
@@ -138,175 +128,93 @@ class EvalCompatEnv:
             return self._env.render(*args, **kwargs)
 
     # ------------------------------------------------------------------
-    # Landing-impact probe (peak downward root vz after JUMP touchdown)
+    # Raw state (batched; leading dim = num_envs)
     # ------------------------------------------------------------------
 
-    def _reset_impact_probe(self) -> None:
-        env = self._env.unwrapped
-        n = int(env.num_envs)
-        device = env.device
-        self._prev_both_contact = torch.zeros(n, dtype=torch.bool, device=device)
-        self._impact_timer = torch.zeros(n, dtype=torch.long, device=device)
-        self._impact_peak_vz = torch.zeros(n, device=device)
-        self._impact_emit = torch.full((n,), -1.0, device=device)
-
-    def _both_foot_contact(self) -> torch.Tensor:
-        from humanoid_run_jump.tasks.manager_based.jump.mdp.gait import foot_contact_mask
-
-        contacts = foot_contact_mask(self._env.unwrapped, sensor_cfg=self._sensor_cfg)
-        return contacts[:, 0] & contacts[:, 1]
-
-    def _update_impact_probe(self) -> None:
-        """Arm on dual-foot rising edge while JUMP; emit peak -vz after window."""
-        env = self._env.unwrapped
-        n = int(env.num_envs)
-        if self._impact_timer.numel() != n:
-            self._reset_impact_probe()
-
-        self._impact_emit.fill_(-1.0)
-
-        mode = getattr(env, "hl_mode", None)
-        if mode is None:
-            mode = torch.zeros(n, dtype=torch.long, device=env.device)
-        else:
-            mode = mode.long()
-
-        both = self._both_foot_contact()
-        rising = both & (~self._prev_both_contact) & (mode == MODE_JUMP)
-        if rising.any():
-            self._impact_timer = torch.where(
-                rising,
-                torch.full_like(self._impact_timer, IMPACT_WINDOW_STEPS),
-                self._impact_timer,
-            )
-            self._impact_peak_vz = torch.where(
-                rising, torch.zeros_like(self._impact_peak_vz), self._impact_peak_vz
-            )
-
-        active = self._impact_timer > 0
-        if active.any():
-            vz_w = env.scene["robot"].data.root_lin_vel_w[:, 2]
-            down = (-vz_w).clamp(min=0.0)
-            self._impact_peak_vz = torch.where(
-                active, torch.maximum(self._impact_peak_vz, down), self._impact_peak_vz
-            )
-            self._impact_timer = torch.where(
-                active, self._impact_timer - 1, self._impact_timer
-            )
-            done = active & (self._impact_timer == 0)
-            if done.any():
-                self._impact_emit = torch.where(done, self._impact_peak_vz, self._impact_emit)
-
-        self._prev_both_contact = both
-
-    # ------------------------------------------------------------------
-    # Locomotion data (consumed by EpisodeRunner for per-step logging)
-    # ------------------------------------------------------------------
-
-    def get_locomotion_data(self, env_idx: int | None = None) -> dict[str, float] | None:
-        """Return per-step locomotion scalars for env *env_idx*."""
-        idx = env_idx if env_idx is not None else 0
+    def get_raw_state(self) -> dict[str, np.ndarray]:
+        """Per-step raw simulator state. No derived / normalized values."""
         env = self._env.unwrapped
         robot = env.scene["robot"]
+        n = int(env.num_envs)
 
-        lin_vel = robot.data.root_lin_vel_b[idx]
-        ang_vel = robot.data.root_ang_vel_b[idx]
-        speed_2d = float(torch.norm(lin_vel[:2]).cpu().item())
+        from humanoid_run_jump.tasks.manager_based.jump.mdp.gait import (
+            _contact_ankle_columns,
+            resolve_ankle_body_ids,
+        )
 
-        cleared = 0
-        obstacle_index = 0
-        if hasattr(env, "cleared_count"):
-            cleared = int(env.cleared_count[idx].cpu().item())
-        if hasattr(env, "obstacle_index"):
-            obstacle_index = int(env.obstacle_index[idx].cpu().item())
+        left_id, right_id = resolve_ankle_body_ids(env)
+        ankle_pos = robot.data.body_pos_w[:, [left_id, right_id], :]
 
-        action_l2 = 0.0
+        foot_forces = torch.zeros(n, 2, 3, device=env.device)
+        try:
+            contact_sensor = env.scene.sensors[self._sensor_cfg.name]
+            forces = contact_sensor.data.net_forces_w[:, self._sensor_cfg.body_ids, :]
+            left_col, right_col = _contact_ankle_columns(env, self._sensor_cfg)
+            foot_forces = torch.stack([forces[:, left_col], forces[:, right_col]], dim=1)
+        except Exception:
+            pass
+
         hl = getattr(env, "last_hl_action", None)
-        if hl is not None:
-            action_l2 = float(torch.norm(hl[idx]).cpu().item())
+        if hl is None:
+            hl_action = np.zeros((n, 1), dtype=np.float32)
+        else:
+            hl_action = _to_numpy(hl).astype(np.float32, copy=False)
 
-        # Env-relative lateral offset from the +x course centerline (y = 0).
-        root_pos = robot.data.root_pos_w[idx]
-        origin = env.scene.env_origins[idx]
-        lateral_offset_m = float(torch.abs(root_pos[1] - origin[1]).cpu().item())
-        progress_delta_m = 0.0
-        prog = getattr(env, "progress_delta", None)
-        if prog is not None:
-            progress_delta_m = float(max(0.0, prog[idx].cpu().item()))
+        hl_mode = getattr(env, "hl_mode", None)
+        if hl_mode is None:
+            mode_arr = np.zeros(n, dtype=np.int64)
+        else:
+            mode_arr = _to_numpy(hl_mode.long()).astype(np.int64, copy=False)
 
-        out: dict[str, float] = {
-            "speed_2d": speed_2d,
-            "lateral_speed": float(torch.abs(lin_vel[1]).cpu().item()),
-            "vertical_speed": float(torch.abs(lin_vel[2]).cpu().item()),
-            "yaw_rate": float(torch.abs(ang_vel[2]).cpu().item()),
-            "roll_pitch_rate": float(torch.norm(ang_vel[:2]).cpu().item()),
-            "cleared_count": float(cleared),
-            "obstacle_index": float(obstacle_index),
-            "action_l2": action_l2,
-            "lateral_offset_m": lateral_offset_m,
-            "progress_delta_m": progress_delta_m,
+        hl_mode_steps = getattr(env, "hl_mode_steps", None)
+        if hl_mode_steps is None:
+            mode_steps_arr = np.zeros(n, dtype=np.float32)
+        else:
+            mode_steps_arr = _to_numpy(hl_mode_steps).astype(np.float32, copy=False)
+
+        def _counter(name: str) -> np.ndarray:
+            t = getattr(env, name, None)
+            if t is None:
+                return np.zeros(n, dtype=np.int64)
+            return _to_numpy(t.long()).astype(np.int64, copy=False)
+
+        grav = getattr(robot.data, "projected_gravity_b", None)
+        if grav is None:
+            grav_arr = np.zeros((n, 3), dtype=np.float32)
+        else:
+            grav_arr = _to_numpy(grav).astype(np.float32, copy=False)
+
+        raw = {
+            "root_pos_w": _to_numpy(robot.data.root_pos_w).astype(np.float32, copy=False),
+            "root_quat_w": _to_numpy(robot.data.root_quat_w).astype(np.float32, copy=False),
+            "root_lin_vel_w": _to_numpy(robot.data.root_lin_vel_w).astype(np.float32, copy=False),
+            "root_lin_vel_b": _to_numpy(robot.data.root_lin_vel_b).astype(np.float32, copy=False),
+            "root_ang_vel_b": _to_numpy(robot.data.root_ang_vel_b).astype(np.float32, copy=False),
+            "projected_gravity_b": grav_arr,
+            "ankle_pos_w": _to_numpy(ankle_pos).astype(np.float32, copy=False),
+            "foot_contact_force_w": _to_numpy(foot_forces).astype(np.float32, copy=False),
+            "hl_action": hl_action,
+            "hl_mode": mode_arr,
+            "hl_mode_steps": mode_steps_arr,
+            "obstacle_index": _counter("obstacle_index"),
+            "cleared_count": _counter("cleared_count"),
+            "hit_count": _counter("hit_count"),
         }
-
-        apex_event = getattr(env, "apex_event", None)
-        if apex_event is not None and bool(apex_event[idx].cpu().item()):
-            peak_z = float(env.apex_peak_z[idx].cpu().item())
-            hurdle_h = 0.0
-            has_next = getattr(env, "has_next_obstacle", None)
-            if has_next is not None and bool(has_next[idx].cpu().item()):
-                hurdle_h = float(env.next_h[idx].cpu().item())
-            elif hasattr(env, "obstacle_h") and obstacle_index > 0:
-                hurdle_h = float(env.obstacle_h[idx, obstacle_index - 1].cpu().item())
-            elif hasattr(env, "obstacle_h"):
-                hurdle_h = float(env.obstacle_h[idx, max(obstacle_index, 0)].cpu().item())
-            clearance_m = peak_z - hurdle_h
-            out["apex_clearance_score"] = float(
-                max(0.0, min(1.0, clearance_m / CLEARANCE_MARGIN_M))
-            )
-            out["apex_err"] = float(env.apex_err[idx].cpu().item())
-
-        stable = getattr(env, "stable_clear_event", None)
-        if stable is not None and bool(stable[idx].cpu().item()):
-            out["stable_clear"] = 1.0
-
-        emit = float(self._impact_emit[idx].cpu().item())
-        if emit >= 0.0:
-            out["landing_impact_vz"] = emit
-
-        return out
-
-    # ------------------------------------------------------------------
-    # State logging (consumed by eval-nav StateLogger)
-    # ------------------------------------------------------------------
+        self._cached_raw = raw
+        return raw
 
     def _log_state(
         self,
         env_idx: int | None = None,
         info: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        state: dict[str, Any] = {}
+        """Per-env projection of ``get_raw_state`` plus task status flags."""
         idx = env_idx if env_idx is not None else 0
+        state: dict[str, Any] = {}
         try:
-            env = self._env.unwrapped
-            robot = env.scene["robot"]
-
-            pos_w = robot.data.root_pos_w
-            state["position"] = (
-                pos_w[idx, :3].cpu().numpy() if torch.is_tensor(pos_w) else pos_w[idx, :3]
-            )
-
-            quat_w = robot.data.root_quat_w[idx]
-            state["quat_w"] = float(quat_w[0].cpu().item())
-            state["lin_vel_b"] = robot.data.root_lin_vel_b[idx].cpu().numpy()
-            state["ang_vel_b"] = robot.data.root_ang_vel_b[idx].cpu().numpy()
-
-            if hasattr(env, "obstacle_index"):
-                state["obstacle_index"] = int(env.obstacle_index[idx].cpu().item())
-            if hasattr(env, "cleared_count"):
-                state["cleared_count"] = int(env.cleared_count[idx].cpu().item())
-            if hasattr(env, "num_obstacles"):
-                state["num_obstacles"] = int(env.num_obstacles[idx].cpu().item())
-            if hasattr(env, "s_max"):
-                state["s_max"] = float(env.s_max[idx].cpu().item())
+            raw = self._cached_raw if getattr(self, "_cached_raw", None) is not None else self.get_raw_state()
+            for key, arr in raw.items():
+                state[key] = arr[idx]
 
             for prop_name in ("task_completed", "task_failed"):
                 val = getattr(self, prop_name)
@@ -335,18 +243,32 @@ class EvalCompatEnv:
         idx = env_idx if env_idx is not None else 0
         try:
             env = self._env.unwrapped
+            origin = env.scene.env_origins[idx].detach().cpu().numpy().astype(np.float32)
             path_length = float(env.path_length[idx].cpu().item()) if hasattr(env, "path_length") else 0.0
             num_obstacles = int(env.num_obstacles[idx].cpu().item()) if hasattr(env, "num_obstacles") else 0
-            xs, hs = [], []
+            xs, hs, ts = [], [], []
             if hasattr(env, "obstacle_x") and hasattr(env, "obstacle_h"):
                 for k in range(num_obstacles):
                     xs.append(float(env.obstacle_x[idx, k].cpu().item()))
                     hs.append(float(env.obstacle_h[idx, k].cpu().item()))
+                    if hasattr(env, "obstacle_t"):
+                        ts.append(float(env.obstacle_t[idx, k].cpu().item()))
+                    else:
+                        ts.append(0.20)
+            step_dt = float(getattr(env, "step_dt", 0.02) or 0.02)
+            half_w = float(getattr(env, "out_of_path_half_width", 2.5))
             return {
+                "env_origin": origin,
                 "path_length": path_length,
                 "num_obstacles": num_obstacles,
                 "obstacle_xs": xs,
                 "obstacle_hs": hs,
+                "obstacle_ts": ts,
+                "out_of_path_half_width": half_w,
+                "step_dt": step_dt,
+                "raw_state_version": RAW_STATE_VERSION,
+                "ankle_body_names": list(self._ankle_body_names),
+                "contact_body_names": list(self._contact_body_names),
             }
         except Exception:
             return None
