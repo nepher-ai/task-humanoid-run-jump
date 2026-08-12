@@ -158,12 +158,9 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import humanoid_run_jump  # noqa: F401
 
-# Allow ``from play_video import ...`` when launched from project root.
-_SCRIPTS_SKRL = Path(__file__).resolve().parent
-if str(_SCRIPTS_SKRL) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS_SKRL))
-from export_amp_policy import export_skrl_amp_policy_as_jit  # noqa: E402
-from play_video import (  # noqa: E402
+# Sibling modules share this script's directory on the import path.
+from export_amp_policy import export_skrl_amp_policy_as_jit
+from play_video import (
     RealTimeVideoRecorder,
     StableRgbRenderWrapper,
     VideoCameraDirector,

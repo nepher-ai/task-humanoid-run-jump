@@ -23,20 +23,18 @@ import glob
 import os
 import re
 import statistics
-import sys
 from pathlib import Path
 
 import mujoco
 import numpy as np
 
-_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(_ROOT / "source" / "humanoid_run_jump"))
-
-from humanoid_run_jump.motions.convert_csv import load_g1_csv  # noqa: E402
-from humanoid_run_jump.robots.g1_constants import G1_MJCF_PATH  # noqa: E402
+from humanoid_run_jump.motions.convert_csv import load_g1_csv
+from humanoid_run_jump.robots.g1_constants import G1_MJCF_PATH
 
 SOLE = 0.05
 CONTACT_Z = 0.03
+
+_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _load_model() -> tuple[mujoco.MjModel, mujoco.MjData]:

@@ -16,8 +16,6 @@ Usage (from ``task-humanoid-run-jump/``)::
 from __future__ import annotations
 
 import argparse
-import sys
-from pathlib import Path
 
 from isaaclab.app import AppLauncher
 
@@ -38,10 +36,6 @@ AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
-
-_PKG_ROOT = Path(__file__).resolve().parents[1] / "source" / "humanoid_run_jump"
-if str(_PKG_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PKG_ROOT))
 
 import gymnasium as gym
 import torch

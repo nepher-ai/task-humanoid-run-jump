@@ -5,6 +5,8 @@
 
 """CPU-only sanity checks for the plant-band redesign (no Isaac Sim required).
 
+Requires the editable install (``pip install -e source/humanoid_run_jump``).
+
 Run from ``task-humanoid-run-jump/``::
 
     python scripts/check_plant_band.py
@@ -12,112 +14,34 @@ Run from ``task-humanoid-run-jump/``::
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import torch
 
-_PKG = Path(__file__).resolve().parents[1] / "source" / "humanoid_run_jump"
-_STRIDE = (
-    _PKG
-    / "humanoid_run_jump"
-    / "tasks"
-    / "manager_based"
-    / "run_jump"
-    / "mdp"
-    / "hl_stride.py"
-)
-_REWARDS = _STRIDE.parent / "hl_rewards.py"
-if str(_PKG) not in sys.path:
-    sys.path.insert(0, str(_PKG))
-
-# Load hl_stride by path so we do not execute mdp/__init__.py (needs Isaac Lab).
-import importlib.util
-
-
-def _load(name: str, path: Path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    mod = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    # Register before exec so dataclasses / annotations resolve.
-    sys.modules[name] = mod
-    spec.loader.exec_module(mod)
-    return mod
-
-
-# jump_envelope is also isaac-free; preload so hl_stride's import resolves.
-_ENV_PATH = (
-    _PKG
-    / "humanoid_run_jump"
-    / "tasks"
-    / "manager_based"
-    / "jump"
-    / "mdp"
-    / "jump_envelope.py"
-)
-sys.modules.setdefault(
-    "humanoid_run_jump.tasks.manager_based.jump.mdp.jump_envelope",
-    _load("jump_envelope_standalone", _ENV_PATH),
-)
-# Make the package path match what hl_stride expects.
-import types
-
-_hrj = types.ModuleType("humanoid_run_jump")
-_hrj_tasks = types.ModuleType("humanoid_run_jump.tasks")
-_hrj_mb = types.ModuleType("humanoid_run_jump.tasks.manager_based")
-_hrj_jump = types.ModuleType("humanoid_run_jump.tasks.manager_based.jump")
-_hrj_jump_mdp = types.ModuleType("humanoid_run_jump.tasks.manager_based.jump.mdp")
-_hrj_rj = types.ModuleType("humanoid_run_jump.tasks.manager_based.run_jump")
-_hrj_rj_mdp = types.ModuleType("humanoid_run_jump.tasks.manager_based.run_jump.mdp")
-for m in (_hrj, _hrj_tasks, _hrj_mb, _hrj_jump, _hrj_jump_mdp, _hrj_rj, _hrj_rj_mdp):
-    sys.modules.setdefault(m.__name__, m)
-
-hl_stride = _load(
-    "humanoid_run_jump.tasks.manager_based.run_jump.mdp.hl_stride", _STRIDE
+from humanoid_run_jump.stride.hl_stride import (
+    APPROACH_STRIDE_X,
+    FLIGHT_HL_MIN,
+    PLANT_BAND_MAX,
+    PLANT_BAND_MIN,
+    STRIDE_ACH_MAX,
+    STRIDE_ACH_MIN,
+    _PK_FL,
+    _PK_VX,
+    _PK_X,
+    apex_from_plant,
+    band_proximity,
+    d_star,
+    feasible_stride_count,
+    flight_for_standoff,
+    in_plant_band,
+    invert_apex,
+    lattice_from_remaining,
+    plant_band_score,
 )
 
-APPROACH_STRIDE_X = hl_stride.APPROACH_STRIDE_X
-FLIGHT_HL_MIN = hl_stride.FLIGHT_HL_MIN
-PLANT_BAND_MAX = hl_stride.PLANT_BAND_MAX
-PLANT_BAND_MIN = hl_stride.PLANT_BAND_MIN
-_PK_FL = hl_stride._PK_FL
-_PK_VX = hl_stride._PK_VX
-_PK_X = hl_stride._PK_X
-apex_from_plant = hl_stride.apex_from_plant
-band_proximity = hl_stride.band_proximity
-cmd_from_stride = hl_stride.cmd_from_stride
-d_star = hl_stride.d_star
-feasible_stride_count = hl_stride.feasible_stride_count
-flight_for_standoff = hl_stride.flight_for_standoff
-in_plant_band = hl_stride.in_plant_band
-invert_apex = hl_stride.invert_apex
-lattice_from_remaining = hl_stride.lattice_from_remaining
-plant_band_score = hl_stride.plant_band_score
-STRIDE_ACH_MAX = hl_stride.STRIDE_ACH_MAX
-STRIDE_ACH_MIN = hl_stride.STRIDE_ACH_MIN
 
-# hl_rewards pulls isaaclab + the gait helpers at import time; stub just enough
-# to reach the pure-tensor scoring helpers.
-_isaaclab = types.ModuleType("isaaclab")
-_isaaclab_managers = types.ModuleType("isaaclab.managers")
-
-
-class _SceneEntityCfg:  # noqa: D101 - stub
-    def __init__(self, *args, **kwargs):
-        self.name = args[0] if args else "robot"
-
-
-_isaaclab_managers.SceneEntityCfg = _SceneEntityCfg
-_gait = types.ModuleType("humanoid_run_jump.tasks.manager_based.jump.mdp.gait")
-_gait.heading_forward = lambda *a, **k: None
-_gait.resolve_ankle_body_ids = lambda *a, **k: (0, 1)
-for _m in (_isaaclab, _isaaclab_managers, _gait):
-    sys.modules.setdefault(_m.__name__, _m)
-
-hl_rewards = _load(
-    "humanoid_run_jump.tasks.manager_based.run_jump.mdp.hl_rewards", _REWARDS
-)
-
+def _h_score(h_cmd: torch.Tensor, h_req: torch.Tensor, sigma: float) -> torch.Tensor:
+    """Mirror of ``hl_rewards._h_score`` (avoids importing Isaac-backed rewards)."""
+    deficit = (h_req - h_cmd).clamp(min=0.0)
+    return torch.exp(-((deficit / max(sigma, 1e-3)) ** 2))
 
 
 def _fail(msg: str) -> None:
@@ -154,7 +78,7 @@ def check_apex_roundtrip() -> None:
             max_err = max(max_err, err)
             if err > 0.02:
                 _fail(f"round-trip P err {err:.4f} at vx={float(vx)} f={float(f)}")
-    print(f"[ok] apex round-trip max |ΔP|={max_err:.4f} m (<0.02)")
+    print(f"[ok] apex round-trip max |dP|={max_err:.4f} m (<0.02)")
 
 
 def check_push_foot_clearance() -> None:
@@ -184,8 +108,8 @@ def check_flight_for_standoff() -> None:
     d2 = d_star(t, f, vx)
     # Invert then re-apply should land near the requested standoff (band clamp aside).
     if abs(float(d2) - float(d)) > 0.05:
-        _fail(f"standoff↔flight consistency |{float(d2)}-{float(d)}|={abs(float(d2)-float(d)):.3f}")
-    print(f"[ok] flight_for_standoff(0.90)→{float(f):.3f}, d* back={float(d2):.3f}")
+        _fail(f"standoff->flight consistency |{float(d2)}-{float(d)}|={abs(float(d2)-float(d)):.3f}")
+    print(f"[ok] flight_for_standoff(0.90)->{float(f):.3f}, d* back={float(d2):.3f}")
 
 
 def check_plant_band_score() -> None:
@@ -296,7 +220,7 @@ def check_band_proximity() -> None:
 def check_h_score_one_sided() -> None:
     h_req = torch.tensor([0.60, 0.60, 0.60])
     h_cmd = torch.tensor([0.60, 0.80, 0.40])
-    s = hl_rewards._h_score(h_cmd, h_req, 0.10)
+    s = _h_score(h_cmd, h_req, 0.10)
     if float(s[1]) < 0.999:
         _fail(f"over-clearance must be free, got {float(s[1]):.3f}")
     if float(s[2]) >= 0.5:

@@ -77,14 +77,6 @@ simulation_app = app_launcher.app
 
 """Rest everything follows."""
 
-import sys
-from pathlib import Path as _Path
-
-# Editable install may be missing in the Isaac python env; ensure package import works.
-_PKG_ROOT = _Path(__file__).resolve().parents[1] / "source" / "humanoid_run_jump"
-if str(_PKG_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PKG_ROOT))
-
 import gymnasium as gym
 import torch
 from isaaclab.managers import SceneEntityCfg
@@ -101,7 +93,7 @@ from humanoid_run_jump.tasks.manager_based.run.mdp.observations import (
 )
 from humanoid_run_jump.tracker.reduced_coords import TARGET_FRAME_DIM
 
-PROJECT_ROOT = _Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUT = PROJECT_ROOT / "motions" / "packaged" / "runin_states.pt"
 # Run policy obs: proprio(64) + base_lin_vel(3) + velocity_commands(3) + last_action(64)
 RUN_OBS_DIM = 64 + 3 + 3 + 64

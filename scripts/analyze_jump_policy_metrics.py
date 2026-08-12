@@ -57,12 +57,6 @@ simulation_app = app_launcher.app
 
 """Rest everything follows."""
 
-from pathlib import Path as _Path
-
-_PKG_ROOT = _Path(__file__).resolve().parents[1] / "source" / "humanoid_run_jump"
-if str(_PKG_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PKG_ROOT))
-
 import gymnasium as gym
 import numpy as np
 import torch
@@ -87,7 +81,7 @@ from humanoid_run_jump.tasks.manager_based.jump.mdp.jump_envelope import (
 )
 from humanoid_run_jump.tracker.reduced_coords import TARGET_FRAME_DIM
 
-PROJECT_ROOT = _Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_POLICY = PROJECT_ROOT / "best_policy" / "jump" / "policy.pt"
 DEFAULT_OUT = PROJECT_ROOT / "outputs" / "jump_analysis"
 RUNIN_BANK = PROJECT_ROOT / "motions" / "packaged" / "runin_states.pt"

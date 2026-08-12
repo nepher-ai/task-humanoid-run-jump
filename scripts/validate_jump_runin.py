@@ -19,14 +19,9 @@ Usage (from project root)::
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 
 import torch
-
-_PKG_ROOT = Path(__file__).resolve().parents[1] / "source" / "humanoid_run_jump"
-if str(_PKG_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PKG_ROOT))
 
 from humanoid_run_jump.agents.frozen_actor import DEFAULT_RUN_POLICY_PATH, FrozenActor
 from humanoid_run_jump.robots.g1_constants import G1_JOINT_NAMES

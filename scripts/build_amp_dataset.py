@@ -16,14 +16,8 @@ from __future__ import annotations
 
 import argparse
 import shutil
-import sys
 import tempfile
 from pathlib import Path
-
-# Allow running without an editable install.
-_PKG_ROOT = Path(__file__).resolve().parents[1] / "source" / "humanoid_run_jump"
-if str(_PKG_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PKG_ROOT))
 
 from humanoid_run_jump.motions.convert_csv import convert_directory
 from humanoid_run_jump.motions.package_motions import package_motions
