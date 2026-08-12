@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Frozen BeyondMimic tracker: TorchScript policy.pt -> joint PD targets.
+"""Frozen BeyondMimic tracker: TorchScript tracker.pt -> joint PD targets.
 
 The exported actor maps a 157-D observation to a 29-D raw action. BeyondMimic
 PD scaling then converts that to position targets::
@@ -45,7 +45,7 @@ from humanoid_run_jump.tracker.reduced_coords import (
 
 # Default location relative to the external project root.
 _PROJECT_ROOT = Path(__file__).resolve().parents[4]
-DEFAULT_POLICY_PATH = _PROJECT_ROOT / "frozen_policies" / "policy.pt"
+DEFAULT_POLICY_PATH = _PROJECT_ROOT / "frozen_policies" / "tracker.pt"
 DEFAULT_META_PATH = _PROJECT_ROOT / "frozen_policies" / "policy_meta.json"
 
 # Explicit per-joint gains / efforts matching G1RobotConfig regex resolution order.
@@ -190,7 +190,7 @@ def resolve_policy_path(policy_path: str | Path | None = None) -> Path:
     if not path.exists():
         raise FileNotFoundError(
             f"Frozen tracker policy not found at '{path}'.\n"
-            "Copy the exported TorchScript file to frozen_policies/policy.pt, or run:\n"
+            "Copy the exported TorchScript file to frozen_policies/tracker.pt, or run:\n"
             "  python scripts/export_frozen_policy.py "
             "--checkpoint <path-to-last.ckpt>"
         )

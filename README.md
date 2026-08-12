@@ -38,7 +38,7 @@ isaaclab.bat -p scripts/build_runin_bank.py --headless --num_envs 64 --num_sampl
 
 | Asset | Purpose |
 |---|---|
-| `frozen_policies/policy.pt` | BeyondMimic tracker |
+| `frozen_policies/tracker.pt` | BeyondMimic tracker |
 | `best_policy/run/policy.pt` | Frozen run actor |
 | `best_policy/jump/policy.pt` | Frozen jump actor |
 | `best_policy/best.pt` (or `best_policy.pt`) | HL policy for play / eval |

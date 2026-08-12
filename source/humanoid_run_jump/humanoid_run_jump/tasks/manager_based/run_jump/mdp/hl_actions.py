@@ -366,7 +366,7 @@ class HierarchicalSwitchActionCfg(ActionTermCfg):
 
     class_type: type = HierarchicalSwitchAction
     asset_name: str = "robot"
-    tracker_path: str | None = None  # → frozen_policies/policy.pt
+    tracker_path: str | None = None  # → frozen_policies/tracker.pt
     run_policy_path: str | None = None  # → best_policy/run/policy.pt
     jump_policy_path: str | None = "best_policy/jump/policy.pt"
     anchor_body_name: str = ANCHOR_BODY_NAME

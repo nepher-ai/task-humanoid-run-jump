@@ -12,7 +12,7 @@ Preferred path: copy an already-exported TorchScript policy::
 
 If only a Lightning checkpoint is available, this script shells out to the
 tracking project's ``export_jit.py`` (one-time build step; the resulting
-``policy.pt`` is then self-contained).
+``tracker.pt`` is then self-contained).
 """
 
 from __future__ import annotations
@@ -26,11 +26,12 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEST_DIR = PROJECT_ROOT / "frozen_policies"
+DEST_NAME = "tracker.pt"
 
 
 def copy_exported(src_pt: Path, src_meta: Path | None = None) -> None:
     DEST_DIR.mkdir(parents=True, exist_ok=True)
-    dest_pt = DEST_DIR / "policy.pt"
+    dest_pt = DEST_DIR / DEST_NAME
     shutil.copy2(src_pt, dest_pt)
     print(f"[export_frozen_policy] copied {src_pt} -> {dest_pt}")
     meta_src = src_meta or src_pt.with_name("policy_meta.json")
@@ -63,15 +64,23 @@ def export_from_ckpt(ckpt: Path) -> None:
     ]
     print(f"[export_frozen_policy] running: {' '.join(cmd)}")
     subprocess.check_call(cmd)
+    # export_jit.py typically writes policy.pt; rename to the project default.
+    produced = out_dir / "policy.pt"
+    dest = out_dir / DEST_NAME
+    if produced.exists() and produced.resolve() != dest.resolve():
+        if dest.exists():
+            dest.unlink()
+        produced.rename(dest)
+        print(f"[export_frozen_policy] renamed {produced.name} -> {dest.name}")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Install frozen tracker policy.pt")
+    parser = argparse.ArgumentParser(description="Install frozen tracker tracker.pt")
     parser.add_argument(
         "--src",
         type=str,
         default=None,
-        help="Path to an already-exported policy.pt (preferred)",
+        help="Path to an already-exported tracker TorchScript (preferred)",
     )
     parser.add_argument(
         "--checkpoint",
