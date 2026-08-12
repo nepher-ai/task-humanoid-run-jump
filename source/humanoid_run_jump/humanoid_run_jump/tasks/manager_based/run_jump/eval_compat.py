@@ -10,7 +10,8 @@ expected by the eval-nav framework:
 
   ``task_completed``      – bool tensor (num_envs,): course finished
   ``task_failed``         – bool tensor: crash / path / fall terminations
-  ``get_locomotion_data`` – per-step scalars: speed_2d, clearance, impact, …
+  ``get_locomotion_data`` – per-step scalars: speed_2d, clearance, impact,
+                            lateral_offset_m, progress_delta_m, …
   ``_log_state``          – dict snapshot for StateLogger
   ``_log_metadata``       – episode-level metadata
   ``wrap_for_eval``       – factory function used by EnvironmentManager
@@ -224,6 +225,15 @@ class EvalCompatEnv:
         if hl is not None:
             action_l2 = float(torch.norm(hl[idx]).cpu().item())
 
+        # Env-relative lateral offset from the +x course centerline (y = 0).
+        root_pos = robot.data.root_pos_w[idx]
+        origin = env.scene.env_origins[idx]
+        lateral_offset_m = float(torch.abs(root_pos[1] - origin[1]).cpu().item())
+        progress_delta_m = 0.0
+        prog = getattr(env, "progress_delta", None)
+        if prog is not None:
+            progress_delta_m = float(max(0.0, prog[idx].cpu().item()))
+
         out: dict[str, float] = {
             "speed_2d": speed_2d,
             "lateral_speed": float(torch.abs(lin_vel[1]).cpu().item()),
@@ -233,6 +243,8 @@ class EvalCompatEnv:
             "cleared_count": float(cleared),
             "obstacle_index": float(obstacle_index),
             "action_l2": action_l2,
+            "lateral_offset_m": lateral_offset_m,
+            "progress_delta_m": progress_delta_m,
         }
 
         apex_event = getattr(env, "apex_event", None)
