@@ -5,8 +5,9 @@
 
 """Copy a frozen BeyondMimic tracker into frozen_policies/.
 
-Export the TorchScript policy in humanoid-g1-tracking first (``export_jit.py``),
-then install it here::
+The tracker is trained in https://github.com/nepher-ai/humanoid-g1-tracking.
+Export the TorchScript policy there first (``export_jit.py``), then install it
+here::
 
     python scripts/export_frozen_policy.py \\
         --src ../humanoid-g1-tracking/results/g1_bm_l2c2_1frame/exported/policy.pt

@@ -3,7 +3,9 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Convert bones-speed G1 CSV motion clips to AMP-ready tensors.
+"""Convert bones-studio/seed G1 CSV motion clips to AMP-ready tensors.
+
+Clips come from https://huggingface.co/datasets/bones-studio/seed.
 
 Expected CSV format (header row, 120 Hz)::
 
@@ -69,7 +71,7 @@ def load_g1_csv(
     output_fps: float | None = None,
     euler_order: str = "xyz",
 ) -> dict[str, Any]:
-    """Load a bones-speed G1 CSV into motion arrays (meters, radians, wxyz)."""
+    """Load a bones-studio/seed G1 CSV into motion arrays (meters, radians, wxyz)."""
     csv_path = Path(csv_path)
     data = np.loadtxt(csv_path, delimiter=",", skiprows=1)
     root_pos = data[:, 1:4] / 100.0  # cm -> m

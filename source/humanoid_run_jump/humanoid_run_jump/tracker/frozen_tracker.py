@@ -5,6 +5,9 @@
 
 """Frozen BeyondMimic tracker: TorchScript tracker.pt -> joint PD targets.
 
+The weights come from a tracker trained in
+https://github.com/nepher-ai/humanoid-g1-tracking (export via ``export_jit.py``).
+
 The exported actor maps a 157-D observation to a 29-D raw action. BeyondMimic
 PD scaling then converts that to position targets::
 

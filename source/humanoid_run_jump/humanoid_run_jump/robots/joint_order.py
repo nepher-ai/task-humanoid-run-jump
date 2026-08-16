@@ -6,7 +6,7 @@
 """Map Isaac Lab USD joint order <-> canonical ``G1_JOINT_NAMES`` order.
 
 The BeyondMimic tracker, CSV motions, and AMP packs all use ``G1_JOINT_NAMES``
-(MJCF / bones-speed order). Isaac Lab's articulation uses the USD parse order,
+(MJCF / bones-studio/seed order). Isaac Lab's articulation uses the USD parse order,
 which is a permutation of the same 29 joints. All sim <-> tracker / AMP I/O must
 go through this remap.
 """

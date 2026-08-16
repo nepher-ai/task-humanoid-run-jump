@@ -3,7 +3,9 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Build AMP reference datasets from bones-speed CSVs (120 Hz).
+"""Build AMP reference datasets from bones-studio/seed CSVs (120 Hz).
+
+Motion clips come from https://huggingface.co/datasets/bones-studio/seed.
 
 Usage (from project root)::
 
